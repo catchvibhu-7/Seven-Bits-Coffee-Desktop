@@ -1,0 +1,18 @@
+services:
+  seven-bits-coffee:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Change these before first run - see server-settings equivalent in
+      # the web app's README-BACKEND.md for the full list of options.
+      OWNER_USERNAME: owner
+      OWNER_PASSWORD: changeme123
+      # UPI_VPA:
+      # UPI_PAYEE_NAME:
+    volumes:
+      # Everything that must survive a rebuild/redeploy - separate from the
+      # image's own bundled code, same separation main.js keeps for the
+      # desktop build (see README's "Where files are stored").
+      - ./volume-data:/data
+    restart: unless-stopped

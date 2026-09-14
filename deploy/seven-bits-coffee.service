@@ -1,0 +1,42 @@
+# Seven Bits Coffee - systemd unit for running server.js directly on a
+# Linux server (no Docker, no Electron/GUI - just plain `node server.js`,
+# which is all this needs since it has zero npm dependencies at runtime).
+#
+# Install:
+#   sudo cp deploy/seven-bits-coffee.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/seven-bits-coffee.service   # set WorkingDirectory, User, and the env vars below
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now seven-bits-coffee
+#
+# Logs (systemd's own, separate from this app's own logs/ folder):
+#   sudo journalctl -u seven-bits-coffee -f
+
+[Unit]
+Description=Seven Bits Coffee POS
+After=network.target
+
+[Service]
+Type=simple
+# Change to wherever this repo is checked out on the server.
+WorkingDirectory=/opt/seven-bits-coffee
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+# Run as a dedicated non-root user, not root - create one first with:
+#   sudo useradd --system --home /opt/seven-bits-coffee sevenbitscoffee
+#   sudo chown -R sevenbitscoffee:sevenbitscoffee /opt/seven-bits-coffee
+User=sevenbitscoffee
+
+Environment=PORT=3000
+Environment=OWNER_USERNAME=owner
+Environment=OWNER_PASSWORD=changeme123
+# Uncomment to keep data/uploads/logs/backups outside the checkout itself
+# (e.g. on a separate disk/partition, or just to survive a `git pull`):
+# Environment=SBC_DATA_DIR=/var/lib/seven-bits-coffee/data
+# Environment=SBC_UPLOADS_DIR=/var/lib/seven-bits-coffee/uploads
+# Environment=SBC_LOGS_DIR=/var/lib/seven-bits-coffee/logs
+# Environment=SBC_BACKUPS_DIR=/var/lib/seven-bits-coffee/backups
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+node_modules
+dist
+data
+logs
+backups
+volume-data
+.git
+main.js
+build
+scripts
+TERMS_AND_PRIVACY.txt

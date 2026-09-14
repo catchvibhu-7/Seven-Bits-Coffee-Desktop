@@ -176,6 +176,59 @@ stretching it, and overwrites `build/icon.png` in place. Uses `jimp`
 (pure JavaScript, no native build step) - the only devDependency this
 added.
 
+## Running headless on a Linux server (no GUI at all)
+
+Everything above (Electron, `main.js`, the installer) is for the desktop-
+app use case - a shop owner running this on their own Windows/Mac/Linux
+computer with a visible window. If you're instead running this on a Linux
+server/VPS/home server as a background service other devices just connect
+to over the network, skip Electron entirely: `server.js` is a plain Node
+script with **zero npm dependencies of its own** (`electron`,
+`electron-builder`, and `jimp` in `package.json` are devDependencies for
+the desktop build only) - `node server.js` is the whole app, no `npm
+install` required, no porting to a different language/stack needed. Same
+file either way; nothing about it is Windows/Electron-specific. The hourly
+backup + log-retention scheduler (see below) lives inside `server.js`
+itself too, not `main.js` - it runs identically in both modes with zero
+extra setup.
+
+Three ways to run it on Linux, in order of how much you want managed for you:
+
+**1. Plain `node server.js`** (simplest, good for trying it out):
+```bash
+git clone https://github.com/catchvibhu-7/Seven-Bits-Coffee-Desktop.git
+cd Seven-Bits-Coffee-Desktop
+OWNER_USERNAME=owner OWNER_PASSWORD=yourStrongPassword PORT=3000 node server.js
+```
+No process supervision - if it crashes or the server reboots, it stays down until you start it again by hand.
+
+**2. systemd service** (recommended for a real always-on deployment):
+a unit file is at `deploy/seven-bits-coffee.service` - copy it to
+`/etc/systemd/system/`, edit the `WorkingDirectory`/`User`/env vars inside
+it, then `systemctl enable --now seven-bits-coffee`. Gives you auto-restart
+on crash and auto-start on boot for free; see the comments in that file for
+the exact commands.
+
+**3. Docker** (most portable - no Node version to manage on the host at all):
+```bash
+docker compose up -d
+```
+`docker-compose.yml` + `Dockerfile` are both in this repo already.
+`docker-entrypoint.sh` seeds the mounted volume's `uploads/` from the
+image's bundled branding photos on first run only (same idea as
+`main.js`'s `seedWritableDirs()` for the desktop build). Data lives in
+`./volume-data` next to `docker-compose.yml` by default - back that
+directory up the same way you would any other bind mount.
+
+All three land you on the exact same `server.js`, so the LAN-address card,
+the encrypted/automatic backups, and the event log all work identically -
+just check the log/backup folder wherever `SBC_LOGS_DIR`/`SBC_BACKUPS_DIR`
+actually point for whichever of the three you chose (unset = the plain
+ROOT_DIR-relative defaults `logs/`/`backups/` next to `server.js` itself,
+which is fine for a single dedicated server but worth pointing elsewhere -
+see the systemd file's commented-out env vars - if this checkout ever gets
+`git pull`ed in place).
+
 ## Connecting from other devices on the same WiFi
 
 The server already listens on every network interface, not just
