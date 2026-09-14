@@ -1193,6 +1193,10 @@ export const AdminPortal = {
                     <label for="ebackup-passphrase">PASSPHRASE (min. 8 characters)</label>
                     <input type="password" id="ebackup-passphrase" autocomplete="new-password" />
                 </div>
+                <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--color-text-muted); cursor:pointer; margin-top:10px;">
+                    <input type="checkbox" id="ebackup-include-archives" />
+                    INCLUDE FULL ORDER HISTORY (orders older than a year, moved to yearly archives to keep routine backups small - off by default, check this for a true complete copy)
+                </label>
                 <button class="admin-btn-primary" id="ebackup-download" style="margin-top:10px;">DOWNLOAD ENCRYPTED BACKUP</button>
 
                 ${
@@ -1235,6 +1239,7 @@ export const AdminPortal = {
                 errorEl.textContent = "Passphrase must be at least 8 characters";
                 return;
             }
+            const includeArchives = document.getElementById("ebackup-include-archives").checked;
             const btn = document.getElementById("ebackup-download");
             btn.disabled = true;
             btn.textContent = "PREPARING…";
@@ -1243,7 +1248,7 @@ export const AdminPortal = {
                     method: "POST",
                     credentials: "include",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ passphrase })
+                    body: JSON.stringify({ passphrase, includeArchives })
                 });
                 if (!res.ok) throw new Error((await res.json()).error || "Could not create backup");
                 const blob = await res.blob();
@@ -1315,7 +1320,8 @@ export const AdminPortal = {
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.error || "Restore failed");
-                        ok(`Restored ${data.restoredCount} file(s) and ${data.uploadsRestored} photo(s) - reloading…`);
+                        const archiveNote = data.archivesRestored ? ` and ${data.archivesRestored} archive year(s)` : "";
+                        ok(`Restored ${data.restoredCount} file(s), ${data.uploadsRestored} photo(s)${archiveNote} - reloading…`);
                         setTimeout(() => window.location.reload(), 1200);
                     } catch (e) {
                         errorEl.textContent = e.message || "Could not restore backup";

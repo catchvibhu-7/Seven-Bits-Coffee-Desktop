@@ -54,6 +54,14 @@ const SEED_DIR = path.join(ROOT_DIR, "data-seed");
 // entirely means a future change to data/'s own handling can't accidentally
 // re-expose it alongside them.
 const UPLOADS_DIR = process.env.SBC_UPLOADS_DIR || path.join(ROOT_DIR, "uploads");
+// Where orders older than ORDER_COMPACTION_DAYS get moved (full detail
+// intact) once compactOldOrders() summarizes their entry in ORDERS_FILE -
+// see the ORDER HISTORY COMPACTION section further down. Lives under
+// DATA_DIR itself (not its own top-level SBC_*_DIR override) since, unlike
+// uploads, nothing ever serves these by URL - they're just bigger JSON
+// files that don't need to move independently of the rest of data/.
+const ARCHIVES_DIR = path.join(DATA_DIR, "archives");
+const ORDER_COMPACTION_DAYS = 365;
 // Diagnostic event log (boot, crashes, orders placed, auth attempts) -
 // distinct from AUDIT_LOG_FILE below, which is a business-facing record of
 // staff actions (owner-readable in the admin panel). This one is a plain
@@ -90,6 +98,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 fs.mkdirSync(LOGS_DIR, { recursive: true });
 fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+fs.mkdirSync(ARCHIVES_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
 // Event log - one plain-text file per calendar day, for troubleshooting a
@@ -3789,8 +3798,15 @@ const BACKUP_FILES = {
  *  scheduled local backups (see AUTOMATIC LOCAL BACKUPS section further
  *  down) - both need the exact same "every JSON record plus every actual
  *  uploaded file" snapshot, just handled differently afterward (one gets
- *  encrypted for download, the other gets gzipped straight to disk). */
-function buildBackupPayload() {
+ *  encrypted for download, the other gets gzipped straight to disk).
+ *
+ *  includeArchives (off by default, and never set true by the automatic
+ *  scheduled backups) bundles the full-detail yearly order archives too
+ *  (see ORDER HISTORY COMPACTION further down) - opt-in because the whole
+ *  point of compacting old orders out of orders.json in the first place
+ *  was to keep routine backups from growing forever; folding the archives
+ *  back in on every automatic backup would silently undo that. */
+function buildBackupPayload({ includeArchives = false } = {}) {
   const files = {};
   for (const [name, filePath] of Object.entries(BACKUP_FILES)) {
     files[name] = readJson(filePath, null);
@@ -3799,7 +3815,15 @@ function buildBackupPayload() {
   for (const filename of fs.readdirSync(UPLOADS_DIR)) {
     uploads[filename] = fs.readFileSync(path.join(UPLOADS_DIR, filename)).toString("base64");
   }
-  return { exportedAt: new Date().toISOString(), files, uploads };
+  const payload = { exportedAt: new Date().toISOString(), files, uploads };
+  if (includeArchives) {
+    const archives = {};
+    for (const filename of fs.readdirSync(ARCHIVES_DIR)) {
+      archives[filename] = readJson(path.join(ARCHIVES_DIR, filename), []);
+    }
+    payload.archives = archives;
+  }
+  return payload;
 }
 
 route("GET", /^\/api\/admin\/backup\/?$/, async (req, res) => {
@@ -3827,11 +3851,15 @@ route("POST", /^\/api\/admin\/backup\/encrypted\/?$/, async (req, res) => {
     return sendJson(res, 400, { error: "Passphrase must be at least 8 characters" });
   }
 
-  const payload = buildBackupPayload();
+  const payload = buildBackupPayload({ includeArchives: !!body.includeArchives });
   const plaintext = zlib.gzipSync(Buffer.from(JSON.stringify(payload), "utf8"));
   const encrypted = encryptBackup(plaintext, passphrase);
 
-  logEvent("info", "Encrypted backup created", { by: session.name, uploadCount: Object.keys(payload.uploads).length });
+  logEvent("info", "Encrypted backup created", {
+    by: session.name,
+    uploadCount: Object.keys(payload.uploads).length,
+    includedArchives: !!payload.archives
+  });
   res.writeHead(200, {
     "Content-Type": "application/octet-stream",
     "Content-Disposition": `attachment; filename="seven-bits-coffee-backup-${new Date().toISOString().slice(0, 10)}.sbcbackup"`
@@ -3868,9 +3896,13 @@ route("POST", /^\/api\/admin\/restore\/encrypted\/?$/, async (req, res) => {
     return sendJson(res, 400, { error: "That doesn't look like a backup file" });
   }
 
-  const { restoredCount, uploadsRestored } = applyBackupPayload({ files: payload.files, uploads: payload.uploads });
-  logEvent("warn", "Whole-instance restore applied (encrypted backup)", { restoredCount, uploadsRestored, by: session.name });
-  sendJson(res, 200, { ok: true, restoredCount, uploadsRestored });
+  const { restoredCount, uploadsRestored, archivesRestored } = applyBackupPayload({
+    files: payload.files,
+    uploads: payload.uploads,
+    archives: payload.archives
+  });
+  logEvent("warn", "Whole-instance restore applied (encrypted backup)", { restoredCount, uploadsRestored, archivesRestored, by: session.name });
+  sendJson(res, 200, { ok: true, restoredCount, uploadsRestored, archivesRestored });
 });
 
 /** Shared by the plain-JSON restore route below and the encrypted-backup
@@ -3880,7 +3912,7 @@ route("POST", /^\/api\/admin\/restore\/encrypted\/?$/, async (req, res) => {
  *  encrypted backup, which - unlike the plain JSON export - actually
  *  captures the real uploaded files, not just uploads.json's metadata
  *  about them) is a map of filename -> base64 content under UPLOADS_DIR. */
-function applyBackupPayload({ files, uploads }) {
+function applyBackupPayload({ files, uploads, archives }) {
   // A backup taken before someone deleted their account would otherwise
   // resurrect that account's real login credentials the moment it's
   // restored - capture who's currently deleted BEFORE users.json gets
@@ -3946,7 +3978,23 @@ function applyBackupPayload({ files, uploads }) {
     }
   }
 
-  return { restoredCount, uploadsRestored };
+  let archivesRestored = 0;
+  if (archives && typeof archives === "object") {
+    for (const [filename, records] of Object.entries(archives)) {
+      // Archive filenames are always this server's own "orders-<YEAR>.json"
+      // shape - same re-validate-before-touching-a-real-path reasoning as
+      // the uploads filenames above.
+      if (!/^orders-\d{4}\.json$/.test(filename) || !Array.isArray(records)) continue;
+      try {
+        writeJson(path.join(ARCHIVES_DIR, filename), records);
+        archivesRestored++;
+      } catch (e) {
+        // One bad archive file shouldn't abort restoring everything else.
+      }
+    }
+  }
+
+  return { restoredCount, uploadsRestored, archivesRestored };
 }
 
 // Whole-instance restore is the single most destructive route in the app -
@@ -4079,6 +4127,118 @@ function cleanupOldLogs() {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// ORDER HISTORY COMPACTION - orders.json otherwise grows forever, which
+// means every backup grows forever too. Once a day, any order older than
+// ORDER_COMPACTION_DAYS gets its full detail (line items, customizations,
+// notes) moved into a yearly archive file (ARCHIVES_DIR/orders-<YEAR>.json)
+// and replaced in orders.json with a compact summary - everything a
+// financial report/tax record actually needs (totals, tax breakdown,
+// payment method, customer info), just not the item-level detail. Nothing
+// is destroyed, only relocated - opening an archived order's detail still
+// works (see GET /api/orders/:id/full below), it just isn't part of the
+// routine automatic/encrypted backups by default (see
+// buildBackupPayload()'s includeArchives option).
+//
+// items is kept as [] on a compacted summary - never omitted or null -
+// because a good dozen call sites elsewhere in this file (kitchen status,
+// KPI best-sellers, coupon usage, billing group merges...) assume
+// order.items is always a real array. An empty array keeps every one of
+// those working exactly as before (.every() on empty is vacuously true,
+// .forEach()/.map() are no-ops, .length is 0) instead of needing to audit
+// and defensively patch each call site individually.
+// ---------------------------------------------------------------------------
+
+function compactOrderForArchive(order) {
+  return {
+    id: order.id,
+    orderNumber: order.orderNumber,
+    createdAt: order.createdAt,
+    storeId: order.storeId ?? null,
+    customerName: order.customerName ?? null,
+    customerPhone: order.customerPhone ?? null,
+    total: order.total,
+    subtotal: order.subtotal,
+    cgst: order.cgst,
+    sgst: order.sgst,
+    serviceCharge: order.serviceCharge,
+    discountAmount: order.discountAmount,
+    paymentMethod: order.paymentMethod,
+    isPaid: order.isPaid,
+    orderType: order.orderType,
+    items: [],
+    itemCount: Array.isArray(order.items) ? order.items.length : 0,
+    archived: true
+  };
+}
+
+function compactOldOrders() {
+  const orders = readJson(ORDERS_FILE, []);
+  const cutoffMs = Date.now() - ORDER_COMPACTION_DAYS * 86400000;
+  const byYear = {};
+  let anyChanged = false;
+
+  const nextOrders = orders.map((order) => {
+    if (order.archived) return order; // already compacted in an earlier run
+    const createdAtMs = new Date(order.createdAt).getTime();
+    if (!Number.isFinite(createdAtMs) || createdAtMs >= cutoffMs) return order;
+    const year = new Date(order.createdAt).getFullYear();
+    (byYear[year] = byYear[year] || []).push(order);
+    anyChanged = true;
+    return compactOrderForArchive(order);
+  });
+
+  if (!anyChanged) return;
+
+  for (const [year, yearOrders] of Object.entries(byYear)) {
+    const archiveFile = path.join(ARCHIVES_DIR, `orders-${year}.json`);
+    const existing = readJson(archiveFile, []);
+    writeJson(archiveFile, existing.concat(yearOrders));
+  }
+  writeJson(ORDERS_FILE, nextOrders);
+  logEvent("info", "Compacted old orders into yearly archives", {
+    archivedCount: Object.values(byYear).reduce((sum, arr) => sum + arr.length, 0),
+    years: Object.keys(byYear)
+  });
+}
+
+// Compaction is a once-a-day job, not hourly like the backup/log checks
+// above - a marker file (rather than re-deriving "did I already run today"
+// from order data on every 5-minute tick) is the cheap way to know.
+const COMPACTION_MARKER_FILE = path.join(DATA_DIR, ".last-compaction");
+
+function runCompactionIfDue() {
+  const today = dateStamp(new Date());
+  let lastRun = null;
+  try {
+    lastRun = fs.readFileSync(COMPACTION_MARKER_FILE, "utf8").trim();
+  } catch (e) {
+    // No marker yet - first run ever.
+  }
+  if (lastRun === today) return;
+  try {
+    compactOldOrders();
+  } catch (e) {
+    logEvent("error", "Order compaction failed", { message: e.message });
+  }
+  fs.writeFileSync(COMPACTION_MARKER_FILE, today);
+}
+
+/** Full detail for one order, whether or not it's been compacted - looks
+ *  it up in the appropriate year's archive file when the live record says
+ *  archived:true, otherwise it's just the live record itself. Shared by
+ *  the order-detail route below and anywhere else that needs one order's
+ *  real item list regardless of its compaction state. */
+function findFullOrder(id) {
+  const orders = readJson(ORDERS_FILE, []);
+  const order = orders.find((o) => o.id === id);
+  if (!order) return null;
+  if (!order.archived) return order;
+  const year = new Date(order.createdAt).getFullYear();
+  const archived = readJson(path.join(ARCHIVES_DIR, `orders-${year}.json`), []);
+  return archived.find((o) => o.id === id) || order;
 }
 
 // ---------------------------------------------------------------------------
@@ -4751,6 +4911,24 @@ route("POST", /^\/api\/orders\/?$/, async (req, res) => {
   broadcastOrdersChanged();
   logEvent("info", "Order placed", { orderId: order.id, orderNumber: order.orderNumber, total: order.total, orderType: order.orderType });
   sendJson(res, 201, order);
+});
+
+// A compacted (archived:true) order's entry in the main list has an empty
+// items array - this is the "show me what was actually in it" escape
+// hatch for Admin Order History's detail view, transparently pulling from
+// the right year's archive file. Fine to call for a non-archived order too
+// (findFullOrder() just returns it as-is), so the client doesn't need to
+// know or care whether a given order happens to be archived before asking.
+route("GET", /^\/api\/orders\/(?<id>[\w-]+)\/full\/?$/, async (req, res, params) => {
+  const session = requireRole(req, res, KITCHEN_ROLES);
+  if (!session) return;
+  const order = findFullOrder(Number(params.id));
+  if (!order) return sendJson(res, 404, { error: "Order not found" });
+  const allowedStores = accessibleStoreIds(session);
+  if (allowedStores && order.storeId != null && !allowedStores.includes(order.storeId)) {
+    return sendJson(res, 403, { error: "You don't have access to that store's order" });
+  }
+  sendJson(res, 200, order);
 });
 
 route("PATCH", /^\/api\/orders\/(?<id>[\w-]+)\/?$/, async (req, res, params) => {
@@ -6569,4 +6747,10 @@ server.listen(PORT, () => {
   // whether this hour's file already exists on disk instead.
   runScheduledBackupIfDue();
   setInterval(runScheduledBackupIfDue, 5 * 60 * 1000);
+  // Same immediate-then-periodic shape as the backup check above -
+  // runCompactionIfDue() itself is the thing that decides whether today's
+  // compaction has already happened (via COMPACTION_MARKER_FILE), so
+  // calling it this often costs nothing on the days it's a no-op.
+  runCompactionIfDue();
+  setInterval(runCompactionIfDue, 5 * 60 * 1000);
 });
