@@ -1,0 +1,45 @@
+{
+  "name": "seven-bits-coffee-desktop",
+  "version": "1.0.0",
+  "description": "Seven Bits Coffee POS, packaged as a desktop app - an Electron wrapper around the existing zero-dependency Node backend, no separate build step for the app itself.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.sevenbitscoffee.desktop",
+    "productName": "Seven Bits Coffee",
+    "files": [
+      "main.js",
+      "server.js",
+      "index.html",
+      "css/**/*",
+      "js/**/*",
+      "uploads/**/*",
+      "data-seed/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.business"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Office"
+    }
+  }
+}

@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <!--
+            Tightened from the old policy (default-src * 'unsafe-inline' 'unsafe-eval'),
+            which let scripts/styles load from ANY origin and allowed eval() - that
+            effectively disabled CSP as a defense. This restricts everything to this
+            origin only.
+            img-src allows any https:// source (not just api.qrserver.com) because the
+            Branding page lets an admin set a hero image, logo, and custom menu-item
+            icons from arbitrary URLs - those are admin-trusted content, not
+            user-submitted, so allowing https broadly here is a deliberate tradeoff
+            rather than an oversight. http:// (unencrypted) sources are still blocked.
+            script-src no longer needs 'unsafe-inline' - every onclick="..."/onchange="..."
+            attribute (and the one inline <script> block, the walking-cat mascot) has been
+            migrated to addEventListener/external files, so an injected inline <script>
+            or event-handler attribute can no longer execute. style-src still needs
+            'unsafe-inline' because this codebase uses style="..." attributes throughout
+            every dynamically generated screen (menu, checkout, admin, kitchen) - moving
+            those to CSS classes is a separate, much larger visual-styling refactor, not
+            attempted here.
+            Clickjacking protection is handled instead by the X-Frame-Options header
+            server.js sends - the frame-ancestors directive doesn't work in a <meta>
+            tag, only in a real HTTP header.
+            checkout.razorpay.com/api.razorpay.com/lumberjack.razorpay.com/
+            cdn.razorpay.com are allowlisted for the optional Razorpay
+            integration (Admin > Payments) - its checkout.js widget loads a
+            script from and opens an iframe/XHR to those origins (cdn.razorpay.com
+            specifically for its own bundled risk-detection script) only when an
+            admin has actually turned Razorpay on.
+            nominatim.openstreetmap.org is the free OSM address-search endpoint
+            used by the delivery address form (js/ui/address-modal.js) to let a
+            customer search for and pick their address instead of only manual
+            pin-drop - no API key, but their usage policy caps light/non-
+            commercial use around 1 request/sec; fine at this app's scale, would
+            need self-hosting or a paid provider if that volume is ever exceeded.
+        -->
+        <meta
+            http-equiv="Content-Security-Policy"
+            content="default-src 'self'; script-src 'self' https://checkout.razorpay.com https://cdn.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; frame-src https://api.razorpay.com https://checkout.razorpay.com; connect-src 'self' https://api.razorpay.com https://lumberjack.razorpay.com https://nominatim.openstreetmap.org;" />
+        <link rel="stylesheet" href="css/theme.css" />
+        <link rel="stylesheet" href="css/iconsvg.css" />
+        <link rel="stylesheet" href="css/cat.css" />
+        <title>Seven Bits Coffee // Hazaribagh</title>
+    </head>
+    <body>
+        <!-- Covers the static #page-home markup below until app.js's boot
+             sequence knows who's actually signed in and has picked the right
+             landing page (staff-home vs. home vs. a tracking deep link) -
+             without this, a reloading staff session (or anyone signed in at
+             all) briefly saw the generic anonymous homepage flash before the
+             swap, since refreshSession() is an async round trip. Removed by
+             app.js right after window.showPage() resolves for the very
+             first time. -->
+        <div id="boot-loading-overlay" style="position:fixed; inset:0; z-index:9999; background:var(--color-bg); color:var(--color-accent); display:flex; align-items:center; justify-content:center; font-family:'Courier New', monospace; font-size:12px; letter-spacing:0.14em; text-transform:uppercase;">
+            LOADING<span class="staff-blink-cursor">_</span>
+        </div>
+        <!-- APP SHELL: for a customer/guest (or anyone logged out), #staff-rail
+             stays display:none below and this wrapper is visually a no-op -
+             the customer experience is byte-for-byte what it was before this
+             wrapper existed. Once a staff (employee/manager/admin/owner)
+             session is active, js/ui/staff-shell.js shows #staff-rail (rail
+             layout) or restyles .system-nav into a top-bar (top-bar layout)
+             instead - see StaffShell in staff-shell.js for the switch. -->
+        <div id="app-shell" style="display:flex; min-height:100vh;">
+            <aside id="staff-rail" class="staff-rail" style="display:none;"></aside>
+            <!-- MOBILE NAV: below 720px this replaces the rail/top-bar entirely
+                 (see the mobile-nav-* rules in theme.css) - a persistent bar
+                 with just a logo and one toggle, plus the drawer it opens
+                 (js/ui/staff-shell.js's renderMobileBar()/renderMobileDrawer()),
+                 modeled on apple.com's own mobile nav pattern. -->
+            <header id="mobile-nav-bar" class="mobile-nav-bar"></header>
+            <div id="mobile-nav-drawer" class="mobile-nav-drawer"></div>
+            <div id="app-main" style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+        <!-- SYSTEM NAVIGATION: Persistent header for page switching -->
+        <nav class="system-nav">
+            <img id="site-logo" src="" alt="" style="display:none; height: 28px; margin-right: 8px; align-self: center;" />
+            <button data-nav-page="home">HOME</button>
+            <button data-nav-page="menu">MENU</button>
+            <button data-nav-page="arcade">ARCADE</button>
+            <!-- ORDERS/ADMIN/Clock-In-Out used to live here, but anyone who
+                 could ever see any of them (KITCHEN_ROLES and its
+                 PAYROLL_ROLES subset) always has the staff shell active
+                 instead (js/ui/staff-shell.js hides or replaces this nav for
+                 that session) - this customer nav is never visible to them
+                 anymore, so those buttons moved into the shell rather than
+                 staying here as unreachable dead markup. -->
+            <button id="nav-account" style="margin-left:auto;">LOGIN</button>
+        </nav>
+
+        <!-- PAGE: STAFF HOME (new dashboard for employee/manager/admin/owner -
+             see js/ui/staff-home.js. Customers/guests never see this page;
+             their home page is #page-home below, unchanged.) -->
+        <div id="page-staff-home" class="page"></div>
+
+        <!-- PAGE: HOME (Guest/customer storefront - matches the Claude Design
+             mockup's "isGuestHome" screen: hero, store-facts strip, featured
+             picks, roast story, and a right-column widget rail. Populated by
+             renderCustomerHome() in app.js from real data (menu items,
+             /api/stats/public, Branding config) - nothing here is fake. -->
+        <div id="page-home" class="page active">
+            <div class="home-hero">
+                <div class="home-hero-inner">
+                    <div class="home-hero-copy">
+                        <div class="home-hero-badge" id="home-hero-badge">Est. 2019 &middot; 8-bit roastery</div>
+                        <h1 class="home-hero-title" id="hero-shop-name">SEVEN BITS COFFEE<span class="staff-blink-cursor">_</span></h1>
+                        <p class="home-hero-tagline" id="hero-tagline">
+                            Born from love for Physics, Coffee, a cat named Ginger and an obssesion with the number seven. We
+                            don't just brew; we process flavor with low-latency precision.
+                        </p>
+                        <div class="home-hero-actions">
+                            <button id="home-hero-start-btn" class="btn-primary">[ START ORDER ]</button>
+                            <!-- Hidden until ArcadeSystem.checkAccess() (called from
+                                 refreshHomeArcadeButton() in app.js) confirms the arcade is
+                                 actually unlocked - same server-enforced window used to gate
+                                 the Arcade page itself, so this never invites a click that
+                                 just bounces to a "place an order to unlock" message. -->
+                            <button id="home-hero-arcade-btn" class="home-hero-secondary" style="display:none;">Arcade</button>
+                        </div>
+                    </div>
+                    <!-- Up to 5 admin-set photos cycle here (see renderHeroCarousel()
+                         in app.js) - two stacked bg layers crossfade between them,
+                         each with its own title/subtitle caption. -->
+                    <div class="home-hero-image">
+                        <div class="home-hero-image-bg" id="home-hero-image-bg" style="opacity:1;"></div>
+                        <div class="home-hero-image-bg" id="home-hero-image-bg-b" style="opacity:0;"></div>
+                        <div class="home-hero-image-gradient"></div>
+                        <span class="home-hero-image-caption">
+                            <span id="home-hero-caption-title">The counter</span>
+                            <span id="home-hero-caption-subtitle"></span>
+                        </span>
+                    </div>
+                </div>
+
+                <!-- The walking-cat mascot (css/cat.css) - a full-width overlay
+                     pinned to .home-hero's own accent-colored border-bottom (see
+                     .home-hero .pixel-kitty-container in theme.css) so the cat
+                     treads right along that line instead of adding its own
+                     separate strip below it, like it did in the pre-redesign
+                     hero layout. -->
+                <div class="pixel-kitty-container">
+                    <div class="kitty-mover">
+                        <div class="kitty-biped"></div>
+                        <div class="kitty-quad"></div>
+                        <!-- id="held-item" (not just a class) is required - cat.css
+                             defines a dedicated #held-item rule the randomizer
+                             script below targets by that id. -->
+                        <div id="held-item"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="home-store-facts" class="home-store-facts"></div>
+
+            <div class="home-body">
+                <div class="home-section-header">
+                    <h2 id="home-heading-picks">This week&rsquo;s picks</h2>
+                    <span id="home-picks-hint">Tap to add</span>
+                </div>
+                <div id="popular-picks-grid" class="home-picks-grid"></div>
+
+                <div class="home-grid-2col">
+                    <div class="home-panel">
+                        <h2 id="home-heading-roast">How we roast</h2>
+                        <p>Seven origins, one drum roaster, no shortcuts. We cup every batch on Thursday and pull anything that doesn&rsquo;t sing. Beans go from roast to cup inside nine days &mdash; the freshness window we refuse to argue about.</p>
+                        <div id="home-roast-steps" class="home-roast-steps"></div>
+                    </div>
+
+                    <div class="home-side-col">
+                        <!-- "Your order" moved to a compact widget in the nav shell itself
+                             (rail/topbar, next to the account button - see
+                             refreshOrderStatusWidget in app.js) so it's visible from any
+                             page, not just here - Find us now takes the accent-highlighted
+                             slot that used to be its. -->
+                        <div class="home-widget home-widget-accent">
+                            <h2 id="home-heading-findus">Find us</h2>
+                            <div id="home-visit-rows"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Delivery-paused notice - populated/shown only when the
+                 currently selected store has delivery disabled, see
+                 renderHomeDeliveryTicker() in app.js. Empty/hidden otherwise. -->
+            <div id="home-delivery-ticker" style="display:none;"></div>
+
+            <!-- Store details footer - content populated from admin Branding settings -->
+            <footer id="site-footer" class="site-footer"></footer>
+        </div>
+
+        <!-- PAGE: MENU (Dynamic menu rendering with view toggles) -->
+<div id="page-menu" class="page">
+    <!-- Persistent Cart/KOT panel beside the grid - see renderMenuCartPanel()
+         in app.js - matching the design mockup's always-visible cart panel,
+         for everyone (customer/guest/staff alike). Desktop-only progressive
+         enhancement: hidden below the breakpoint in theme.css, where the
+         footer cart bar + checkout modal below is the fallback - still fully
+         functional, just less convenient on a small screen. -->
+    <div class="menu-layout">
+        <!-- Heading, category chips/view-toggle, favorites/search, the grid
+             itself, and #footer-actions all live in this one column (not
+             spanning the full page behind #menu-cart-panel) - .menu-controls
+             and #footer-actions both use a sticky "right edge" trick (see
+             .footer-container in theme.css) that resolves against whatever
+             element contains them, so they used to align to the page's
+             actual right edge and land visually inside/behind the cart
+             panel instead of this column's own right edge. -->
+        <div class="menu-grid-column">
+            <!-- Pinned to the top of the scrolling page while the item grid/
+                 list below scrolls past it - see .menu-sticky-header. -->
+            <div class="menu-sticky-header">
+                <div class="menu-page-header">
+                    <h1 class="menu-page-title">MENU<span>/</span>ORDER</h1>
+                </div>
+
+                <div class="menu-header-controls">
+                    <!-- Category filter chips - populated in renderMenuCategoryChips()
+                         (app.js) once menuData.sections loads, since the section list
+                         isn't known until then. -->
+                    <div id="menu-cat-chips" class="menu-cat-chips"></div>
+                    <div class="menu-view-toggle-group">
+                        <button type="button" id="menu-view-grid-btn">&#9638; Grid</button>
+                        <button type="button" id="menu-view-list-btn">&#9776; List</button>
+                    </div>
+                </div>
+                <!-- Populated in renderMenuDietFilter() (app.js) - ALL/VEG/NON-VEG,
+                     kept as its own row rather than squeezed into the chips row
+                     above, which already has its own width-measured overflow
+                     logic (see renderMenuCategoryChips()'s own comment). -->
+                <div id="menu-diet-filter" class="menu-diet-filter"></div>
+            </div>
+
+            <div class="menu-controls">
+                <button type="button" id="favorites-filter-label" style="display:none; align-items:center; gap:5px; font-size: 11px; color: var(--color-text-muted); cursor:pointer; font-family: 'Courier New', monospace; user-select:none; background:none; border:none; padding:0;">
+                    <span id="favorites-filter-star" aria-hidden="true" style="font-size:15px; line-height:1; color: var(--color-text-muted);">&#9734;</span> <span id="favorites-filter-text">FAVORITES ONLY</span>
+                </button>
+                <!-- Search is wired via window.initSearchBar() in app.js (debounced), not an inline
+                     handler - the old oninput="renderMenu(...)" called a function that was never
+                     attached to window, so it silently errored on every keystroke. -->
+                <input type="text" id="menu-search" placeholder="SEARCH_BITS..." aria-label="Search menu items">
+            </div>
+
+            <div id="menu-root"></div>
+
+            <!-- UNIFIED ACTION FOOTER -->
+            <div id="footer-actions" class="footer-container" style="display: none;">
+                <!-- JUMP MENU (NESTED INSIDE) - content fully rebuilt by
+                     window.toggleJumpMenu() (app.js) each time it opens, so
+                     this starts empty rather than with markup that's always
+                     immediately overwritten anyway. -->
+                <div id="jump-menu" class="jump-overlay"></div>
+
+                <!-- CART BAR -->
+                <div id="cart-status" class="cart-bar">
+                    <span id="cart-bits-label">BITS IN CART:</span>
+                    <span id="cart-count">0</span>
+                </div>
+
+                <!-- JUMP BUTTON -->
+                <button id="jump-menu-fab-btn" class="btn-jump-fab" aria-label="Jump to category">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="3" aria-hidden="true">
+                        <path d="M3 12h18M3 6h18M3 18h18"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <aside id="menu-cart-panel" class="menu-cart-panel" style="display:none;"></aside>
+    </div>
+</div>
+        <!-- PAGE: ARCADE (in-store games, unlocked after placing an order) -
+             same page-header treatment (bold left-aligned h1, accent
+             underline, 1600px/26-28-44 wrapper) as Billing/Admin, which this
+             used to not match (a plain centered h2, no underline, its own
+             1400px/20px wrapper) despite otherwise sharing the same visual
+             language (arcade-page.js's .arcade-grid/.arcade-card already
+             echo .menu-grid's card chrome). -->
+        <div id="page-arcade" class="page">
+            <!-- Top padding matches .menu-page-header's own 10px top padding
+                 (theme.css), same fix as Billing/Kitchen - see their own
+                 comments for why. No max-width/margin:auto cap either - Menu
+                 has none, so on a wide screen this used to leave large empty
+                 margins on both sides that Menu didn't have. -->
+            <div style="padding:10px 28px 44px;">
+                <div style="border-bottom:2px solid var(--color-accent); padding-bottom:16px; margin-bottom:22px;">
+                    <h1 id="arcade-page-title" style="font-size:26px; font-weight:bold; letter-spacing:2px; margin:0; text-transform:uppercase;">ARCADE</h1>
+                </div>
+                <div id="arcade-root"></div>
+            </div>
+        </div>
+
+        <!-- PAGE: ORDER TRACKING (no login - reached via ?track=<token> from
+             the QR code shown at checkout; see js/ui/track-page.js) -->
+        <div id="page-track" class="page">
+            <div id="track-root" style="padding:26px 28px 44px; max-width:520px; margin:0 auto;"></div>
+        </div>
+
+        <!-- PAGE: ORDERS (Kitchen Display System / KOT Management) -->
+        <div id="page-kitchen" class="page">
+            <!-- Top padding matches .menu-page-header's own 10px top padding
+                 (theme.css) rather than the old 26px, which sat this page's
+                 heading noticeably lower than Menu's. No max-width/margin:auto
+                 cap either - Menu has none, so on a wide screen this used to
+                 leave large empty margins on both sides that Menu didn't have. -->
+            <div style="padding:10px 28px 44px;">
+                <!-- Same bold-heading + accent-underline treatment as Billing/
+                     Arcade's own page-header block - this page never had one. -->
+                <div style="border-bottom:2px solid var(--color-accent); padding-bottom:16px; margin-bottom:22px;">
+                    <h1 style="font-size:26px; font-weight:bold; letter-spacing:2px; margin:0; text-transform:uppercase;">ORDERS</h1>
+                </div>
+                <!-- Station tabs restyled to match the admin panel's sub-tab look.
+                     TABLES/TABS sits here too (not a separate toggle button) since
+                     it's another way of tracking active orders - just grouped by
+                     table instead of by station. -->
+                <div class="kitchen-tabs admin-tabs">
+                    <button class="admin-tab-btn active" data-station="MASTER">ALL STATIONS</button>
+                    <button class="admin-tab-btn" data-station="BARISTA">BARISTA</button>
+                    <button class="admin-tab-btn" data-station="KITCHEN">KITCHEN</button>
+                    <button class="admin-tab-btn" data-station="DESSERTS">DESSERTS</button>
+                    <button class="admin-tab-btn" data-station="TABLES">TABLES / TABS</button>
+                </div>
+
+                <!-- Active vs. history filter + date sort - not relevant to the Tables view -->
+                <div class="kitchen-toolbar" id="kitchen-status-toolbar">
+                    <div class="kitchen-status-filter">
+                        <button class="admin-btn active" data-status-filter="active">ACTIVE</button>
+                        <button class="admin-btn" data-status-filter="history">HISTORY</button>
+                        <button class="admin-btn" data-status-filter="all">SHOW ALL</button>
+                    </div>
+                    <select id="kitchen-sort"
+                        style="background:var(--color-bg); border:1px solid var(--color-border); color:var(--color-text); padding:8px 10px; font-family:inherit; font-size:11px;">
+                        <option value="newest">NEWEST FIRST</option>
+                        <option value="oldest">OLDEST FIRST</option>
+                    </select>
+                </div>
+
+                <!-- Postpaid table tabs - staff open/close these to group multiple
+                     orders into one combined bill. Only visible when the
+                     TABLES/TABS tab above is selected. -->
+                <div id="tables-panel-root" style="display:none; margin-bottom:20px;"></div>
+
+                <!-- Target for dynamic KOT ticket injection -->
+                <div id="kitchen-orders-root"></div>
+            </div>
+        </div>
+
+        <!-- PAGE: BILLING (staff-only - js/ui/billing-page.js) - a direct way
+             to settle any open table or standalone unpaid order with a
+             recorded payment method, alongside (not instead of) the
+             existing TABLES/TABS close-and-bill flow above. -->
+        <div id="page-billing" class="page">
+            <!-- Top padding matches .menu-page-header's own 10px top padding
+                 (theme.css) rather than the old 26px, which sat this page's
+                 heading noticeably lower than Menu's. No max-width/margin:auto
+                 cap either - Menu has none, so on a wide screen this used to
+                 leave large empty margins on both sides that Menu didn't have. -->
+            <div style="padding:10px 28px 44px;">
+                <div style="border-bottom:2px solid var(--color-accent); padding-bottom:16px; margin-bottom:22px;">
+                    <h1 style="font-size:26px; font-weight:bold; letter-spacing:2px; margin:0; text-transform:uppercase;">BILLING</h1>
+                </div>
+                <div id="billing-root"></div>
+            </div>
+        </div>
+
+        <!-- PAGE: ADMIN (System configuration and menu repository) -->
+        <div id="page-admin" class="page">
+            <div class="admin-wrapper">
+                <header class="admin-header">
+                    <h1 style="margin:0;">SYSTEM CONFIGURATION</h1>
+                </header>
+
+                <!-- Sub-tab nav: Global Settings / Menu Items / User Management / Branding -->
+                <div id="admin-tabs" class="admin-tabs"></div>
+                <div id="admin-tab-content"></div>
+            </div>
+        </div>
+
+        </div>
+        <!-- /APP SHELL -->
+
+        <!-- Randomizes which icon the walking cat is "holding" each time its
+             walk-and-tumble animation loop restarts, and keeps its walking
+             PACE constant (px/second) across screen sizes. Needs to run
+             after the pixel-kitty-container markup above (for getElementById
+             to find #held-item) but before app.js, which is just where it's
+             placed - a plain non-module script always runs synchronously as
+             the parser reaches it, so no DOMContentLoaded wrapper is needed
+             here since the container HTML is already above it in the file.
+             External file (not inline) so script-src doesn't need
+             'unsafe-inline' just for this. -->
+        <script src="js/cat-mascot.js"></script>
+
+        <!-- Main JS entry point (Module type required for ES6 imports) -->
+        <script type="module" src="js/app.js"></script>
+    </body>
+</html>
