@@ -46,12 +46,32 @@ function showNetworkAddress() {
     });
 }
 
+/** Which installer produced this build - see scripts/set-variant.js, run
+ *  before electron-builder packages either the "regular" or "demo" variant.
+ *  Missing entirely (e.g. running `electron .` straight from a checkout
+ *  with no build step) is treated the same as "regular": no demo content,
+ *  no auto-seed. */
+function readVariant() {
+    try {
+        return JSON.parse(fs.readFileSync(path.join(__dirname, "build", "variant.json"), "utf8"));
+    } catch (e) {
+        return { demo: false };
+    }
+}
+
 function seedWritableDirs() {
     const userDataDir = app.getPath("userData");
     const dataDir = path.join(userDataDir, "data");
     const uploadsDir = path.join(userDataDir, "uploads");
     const logsDir = path.join(userDataDir, "logs");
     const backupsDir = path.join(userDataDir, "backups");
+    // Both the demo-content auto-seed below and the upload-seeding right
+    // after it are genuinely first-run-only - an update/reinstall over an
+    // existing install (or one where the uninstaller's "keep data?" prompt
+    // was answered yes - see build/installer.nsh) reuses this same
+    // %APPDATA% folder untouched, so this check is what keeps updates from
+    // ever wiping a shop's real data back to blank or demo content.
+    const isFreshInstall = !fs.existsSync(dataDir);
     fs.mkdirSync(dataDir, { recursive: true });
     fs.mkdirSync(logsDir, { recursive: true });
     fs.mkdirSync(backupsDir, { recursive: true });
@@ -71,16 +91,45 @@ function seedWritableDirs() {
         }
     }
 
-    return { dataDir, uploadsDir, logsDir, backupsDir };
+    return { dataDir, uploadsDir, logsDir, backupsDir, isFreshInstall };
+}
+
+/** Demo-variant-only, and only on a genuinely fresh install (see
+ *  isFreshInstall above) - writes data-seed/demo-backup.json's catalog
+ *  straight into the freshly created data/uploads folders, before
+ *  server.js's own first-boot defaults (blank config, data-seed/menu-
+ *  seed.json) get a chance to run, so the demo content wins. Deliberately
+ *  not routed through server.js's applyBackupPayload() - the server hasn't
+ *  started yet at this point, and there's no restore-time edge case to
+ *  handle (no existing users, no archives) on a folder that was empty a
+ *  moment ago. */
+function applyDemoDataIfNeeded(dataDir, uploadsDir, isFreshInstall) {
+    if (!isFreshInstall || !readVariant().demo) return;
+    const demoPath = path.join(__dirname, "data-seed", "demo-backup.json");
+    if (!fs.existsSync(demoPath)) return;
+    const payload = JSON.parse(fs.readFileSync(demoPath, "utf8"));
+    for (const [name, content] of Object.entries(payload.files || {})) {
+        fs.writeFileSync(path.join(dataDir, name), JSON.stringify(content, null, 2));
+    }
+    // Same filename shape check applyBackupPayload() uses server-side -
+    // this file ships inside our own signed installer, but there's no
+    // reason to skip a cheap sanity check just because the source is
+    // trusted this time too.
+    for (const [filename, base64] of Object.entries(payload.uploads || {})) {
+        if (!/^[a-f0-9]{16}\.(png|jpg|jpeg|gif|webp)$/i.test(filename)) continue;
+        fs.writeFileSync(path.join(uploadsDir, filename), Buffer.from(base64, "base64"));
+    }
 }
 
 function startServer() {
-    const { dataDir, uploadsDir, logsDir, backupsDir } = seedWritableDirs();
+    const { dataDir, uploadsDir, logsDir, backupsDir, isFreshInstall } = seedWritableDirs();
+    applyDemoDataIfNeeded(dataDir, uploadsDir, isFreshInstall);
     process.env.PORT = String(PORT);
     process.env.SBC_DATA_DIR = dataDir;
     process.env.SBC_UPLOADS_DIR = uploadsDir;
     process.env.SBC_LOGS_DIR = logsDir;
     process.env.SBC_BACKUPS_DIR = backupsDir;
+    process.env.SBC_DEMO_BUILD = readVariant().demo ? "1" : "";
     // Same default owner credentials the web version's start.bat ships on
     // first run (see server-settings.bat there) - not a new pattern, and
     // changing it is one login + a trip to Account Settings away. Only

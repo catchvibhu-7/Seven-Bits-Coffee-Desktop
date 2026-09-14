@@ -4020,6 +4020,17 @@ route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
   sendJson(res, 200, { ok: true, restoredCount });
 });
 
+// Whether this build ships the demo bundle at all - main.js sets
+// SBC_DEMO_BUILD only for the "Demo" installer variant (see
+// scripts/set-variant.js / build/variant.json), so the regular install/
+// update build never even reports the capability and the LOAD DEMO DATA
+// button in admin-portal.js simply never renders for it.
+route("GET", /^\/api\/admin\/demo-available\/?$/, async (req, res) => {
+  const session = requireRole(req, res, ["owner", "admin"]);
+  if (!session) return;
+  sendJson(res, 200, { available: process.env.SBC_DEMO_BUILD === "1" });
+});
+
 // Loads the sample menu/branding/uploads bundled with this app (data-seed/
 // demo-backup.json - built once from a real shop's catalog, scrubbed of
 // every user/order/staff-activity file) so a brand new install isn't a

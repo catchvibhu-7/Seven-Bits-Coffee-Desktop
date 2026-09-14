@@ -8,10 +8,13 @@
   "scripts": {
     "start": "electron .",
     "icon": "node scripts/generate-icon.js",
-    "dist": "electron-builder",
-    "dist:win": "electron-builder --win",
-    "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux"
+    "dist": "node scripts/set-variant.js regular && electron-builder",
+    "dist:win": "node scripts/set-variant.js regular && electron-builder --win",
+    "dist:mac": "node scripts/set-variant.js regular && electron-builder --mac",
+    "dist:linux": "node scripts/set-variant.js regular && electron-builder --linux",
+    "dist:win:demo": "node scripts/set-variant.js demo && electron-builder --win --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo",
+    "dist:mac:demo": "node scripts/set-variant.js demo && electron-builder --mac --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo",
+    "dist:linux:demo": "node scripts/set-variant.js demo && electron-builder --linux --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo"
   },
   "devDependencies": {
     "electron": "^32.0.0",
@@ -30,6 +33,7 @@
       "js/**/*",
       "uploads/**/*",
       "data-seed/**/*",
+      "build/variant.json",
       "TERMS_AND_PRIVACY.txt"
     ],
     "directories": {
@@ -41,7 +45,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "license": "TERMS_AND_PRIVACY.txt"
+      "license": "TERMS_AND_PRIVACY.txt",
+      "include": "build/installer.nsh"
     },
     "mac": {
       "target": "dmg",

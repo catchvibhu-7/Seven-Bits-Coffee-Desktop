@@ -1163,6 +1163,18 @@ export const AdminPortal = {
         const isOwner = this.session.role === "owner";
         const isGlobalAdmin = this.isGlobalAdmin();
         const canRestore = isGlobalAdmin;
+        // Only the "Demo" installer build ever reports this available - the
+        // regular install/update build has no way to show this section at
+        // all, by design (see GET /api/admin/demo-available, server.js).
+        let demoAvailable = false;
+        if (canRestore) {
+            try {
+                const res = await fetch("/api/admin/demo-available", { credentials: "include" });
+                if (res.ok) demoAvailable = (await res.json()).available;
+            } catch (e) {
+                // Treat as unavailable rather than blocking the rest of this tab from rendering.
+            }
+        }
         root.innerHTML = `
             <div class="config-controls">
                 <h3 style="margin-top:0;">BACKUP</h3>
@@ -1170,12 +1182,18 @@ export const AdminPortal = {
                 <button class="admin-btn-primary" id="backup-download">DOWNLOAD BACKUP</button>
 
                 ${
-                    canRestore
+                    canRestore && demoAvailable
                         ? `
                 <h3 style="margin-top:25px; border-top:1px solid var(--color-border); padding-top:20px;">DEMO DATA</h3>
-                <p class="admin-help-text">Loads a sample menu, branding, and photos bundled with this app - a quick way to see it populated instead of blank. Overwrites current menu, combos, coupons, stores, and branding. Never touches staff accounts or order history.</p>
-                <button class="admin-btn-secondary" id="demo-load" style="border-color:var(--color-danger); color:var(--color-danger);">LOAD DEMO DATA</button>
+                <p class="admin-help-text">This is the demo build - sample data was already loaded on first launch. Use this to reset back to it at any time. Overwrites current menu, combos, coupons, stores, and branding. Never touches staff accounts or order history.</p>
+                <button class="admin-btn-secondary" id="demo-load" style="border-color:var(--color-danger); color:var(--color-danger);">RESET TO DEMO DATA</button>
+                `
+                        : ""
+                }
 
+                ${
+                    canRestore
+                        ? `
                 <h3 style="margin-top:25px; border-top:1px solid var(--color-border); padding-top:20px;">RESTORE</h3>
                 <p class="admin-help-text" style="color:var(--color-danger);">Overwrites current data with whatever's in the backup file - menu, orders, staff accounts, everything it contains. This can't be undone. Only restore a backup you trust.</p>
                 <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
@@ -1273,11 +1291,11 @@ export const AdminPortal = {
 
         if (!canRestore) return;
 
-        document.getElementById("demo-load").addEventListener("click", () => {
+        if (demoAvailable) document.getElementById("demo-load").addEventListener("click", () => {
             renderInfoModal({
-                title: "LOAD DEMO DATA",
+                title: "RESET TO DEMO DATA",
                 message: "This will overwrite the current menu, combos, coupons, stores, and branding with sample content. Staff accounts and order history are left alone. This can't be undone. Continue?",
-                confirmText: "LOAD DEMO DATA",
+                confirmText: "RESET TO DEMO DATA",
                 cancelText: "CANCEL",
                 onConfirm: async () => {
                     const errorEl = document.getElementById("backup-error");
