@@ -6712,15 +6712,32 @@ function getLanIPs() {
       if (iface.family === "IPv4" && !iface.internal) ips.push(iface.address);
     }
   }
+  // Standard private LAN ranges (192.168.x, 10.x, 172.16-31.x) sort ahead
+  // of CGNAT-range addresses (100.64.0.0/10, e.g. Tailscale) - callers that
+  // just take urls[0] (the order-confirmation tracking QR - see
+  // upgradeTrackingQrForLan() in checkout-modal.js) need "the address a
+  // phone on this shop's own WiFi can reach", which a Tailscale address
+  // only satisfies for another device already on that same Tailscale
+  // network, never a random customer's phone.
+  const isCgnat = (ip) => {
+    const [a, b] = ip.split(".").map(Number);
+    return a === 100 && b >= 64 && b <= 127;
+  };
+  ips.sort((a, b) => isCgnat(a) - isCgnat(b));
   return ips;
 }
 
 // Lets the staff home page show the LAN address as a card (see
 // staff-home.js) instead of only being visible in main.js's startup dialog
 // or a terminal's console output - staff can look it up anytime to hand to
-// someone setting up a second till or a kitchen tablet.
+// someone setting up a second till or a kitchen tablet. Also used by a
+// customer/guest's own order-confirmation screen (checkout-modal.js's
+// upgradeTrackingQrForLan()) to fix the tracking QR when the desktop app's
+// window is showing "localhost" - any authenticated session, not just
+// staff, since knowing this machine's LAN address doesn't grant access to
+// anything that isn't already reachable on that same network regardless.
 route("GET", /^\/api\/network-info\/?$/, async (req, res) => {
-  if (!requireRole(req, res, KITCHEN_ROLES)) return;
+  if (!requireSession(req, res)) return;
   sendJson(res, 200, { port: PORT, urls: getLanIPs().map((ip) => `http://${ip}:${PORT}`) });
 });
 

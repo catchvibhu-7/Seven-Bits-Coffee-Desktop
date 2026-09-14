@@ -504,18 +504,59 @@ function round2(n) {
     return Math.round(n * 100) / 100;
 }
 
+/** Builds the actual QR <img> src for a given base origin - shared by the
+ *  initial synchronous render and upgradeTrackingQrForLan()'s later swap
+ *  (see below), so the two can never drift into building the URL two
+ *  different ways. */
+function trackingQrSrc(origin, trackingToken) {
+    const trackUrl = `${origin}${location.pathname}?track=${trackingToken}`;
+    return `https://api.qrserver.com/v1/create-qr-code/?size=110x110&data=${encodeURIComponent(trackUrl)}`;
+}
+
 /** QR for the no-login order-tracking page (js/ui/track-page.js) - built
  *  client-side (same free QR API the UPI QR already uses) so the server
- *  never has to guess its own public origin/protocol. */
+ *  never has to guess its own public origin/protocol.
+ *
+ *  Starts from location.origin, which is already correct for a normal web/
+ *  server deployment - but the desktop app's BrowserWindow always loads
+ *  http://localhost:<port>, and a phone scanning that QR would try to open
+ *  "localhost" on ITSELF, not the till this order was placed on. See
+ *  upgradeTrackingQrForLan() below, called right after this renders, which
+ *  swaps in the till's real LAN address for exactly that case. */
 function trackingQrHtml(trackingToken) {
-    const trackUrl = `${location.origin}${location.pathname}?track=${trackingToken}`;
-    const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=110x110&data=${encodeURIComponent(trackUrl)}`;
+    const qrSrc = trackingQrSrc(location.origin, trackingToken);
     return `
-        <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin:16px 0; padding-top:16px; border-top:1px dashed var(--color-border);">
-            <div style="background:white; padding:6px; border:2px solid var(--color-accent);"><img src="${qrSrc}" alt="Track order QR" width="90" height="90"></div>
+        <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin:16px 0; padding-top:16px; border-top:1px dashed var(--color-border);" id="tracking-qr-row">
+            <div style="background:white; padding:6px; border:2px solid var(--color-accent);"><img id="tracking-qr-img" src="${qrSrc}" alt="Track order QR" width="90" height="90"></div>
             <p style="font-family: 'Courier New', monospace; color: var(--color-text-muted); font-size: 11px; text-align:left; margin:0; max-width:150px;">${t("checkout.scanToTrack")}</p>
         </div>
     `;
+}
+
+/** Swaps the tracking QR to use this machine's real LAN address instead of
+ *  "localhost" - only does anything when location.hostname is actually a
+ *  loopback address (the desktop app's case); a no-op for a normal web/
+ *  server deployment where location.origin was already a real reachable
+ *  address for anyone else on the network. Filled in after the fact
+ *  (called right after the confirmation modal's own appendChild), same
+ *  "don't block the confirmation screen on a network round-trip" pattern
+ *  the wait-time line below already uses. GET /api/network-info is open to
+ *  any authenticated session (not just staff) specifically so a customer's
+ *  own self-checkout confirmation can call it too. */
+async function upgradeTrackingQrForLan(trackingToken) {
+    if (!["localhost", "127.0.0.1", "[::1]", "::1"].includes(location.hostname)) return;
+    try {
+        const res = await fetch("/api/network-info", { credentials: "include" });
+        if (!res.ok) return;
+        const { urls } = await res.json();
+        const lanUrl = urls?.[0];
+        if (!lanUrl) return;
+        const img = document.getElementById("tracking-qr-img");
+        if (img) img.src = trackingQrSrc(lanUrl, trackingToken);
+    } catch (e) {
+        // Confirmation screen already shows a (locally-correct) QR - worth
+        // trying to upgrade it, not worth surfacing an error over.
+    }
 }
 
 /** Lazily loads Razorpay's Checkout.js widget (only ever needed once Razorpay
@@ -664,6 +705,7 @@ export function renderPaymentConfirmation(order, method, { isCustomerFacing = fa
             </div>
         `;
         document.body.appendChild(overlay);
+        if (order.trackingToken) upgradeTrackingQrForLan(order.trackingToken);
         // Filled in after the fact rather than blocking the confirmation
         // screen on a network round-trip - the order's own lines are already
         // part of the backlog this reads (it was just saved server-side), so
