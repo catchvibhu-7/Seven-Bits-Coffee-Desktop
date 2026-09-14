@@ -33,6 +33,42 @@ adds:
   reachable afterward via Help → Terms & Privacy. **It's a generic
   unreviewed template** — have an actual lawyer look at it before relying on
   it commercially; see the file's own warning at the top.
+- **Encrypted backup/restore**: Admin → Global Settings → Data Backup has an
+  "ENCRYPTED BACKUP" section below the existing plain one - it bundles
+  every setting/order/staff record PLUS the actual uploaded photos (the
+  plain backup only includes their metadata, not the files themselves),
+  gzips and AES-256-GCM-encrypts the result with a passphrase you set, and
+  downloads it as a `.sbcbackup` file. **There is no recovery if you forget
+  that passphrase** - store it somewhere safe, separately from the backup
+  file itself. Restoring one (Global Admin only, same as the plain restore)
+  puts back settings, orders, AND the photos. Not wired to auto-upload to
+  Google Drive yet - see the next section.
+- **Diagnostic event log**: server boot, login attempts, orders placed, and
+  any crash get written to `logs/` (one plain-text file per day) -
+  reachable via Help → Open Logs Folder. Separate from the in-app Admin
+  Audit Log, which tracks staff actions, not troubleshooting events.
+
+## Google Drive backup (not built yet - needs your input)
+
+The encrypted backup above already produces a file you can manually drop in
+Drive today. Making the app do that automatically needs a Google Cloud
+project with OAuth credentials, which only the account owner can create (no
+generic "just connect" exists for third-party apps):
+
+1. Create a free project at console.cloud.google.com
+2. Enable the Google Drive API on it
+3. Create an OAuth 2.0 Client ID (type: **Desktop app**)
+4. Provide the Client ID + Client Secret
+
+Once available, the plan is: `drive.appdata` scope (a hidden per-app folder
+regular Drive browsing can't see or touch, and it skips Google's stricter
+verification process required for broader Drive access), loopback-flow
+OAuth (opens your system browser, a local temporary HTTP server on this
+machine catches the redirect - the modern replacement for the old
+copy-paste-a-code flow Google has deprecated), refresh token encrypted at
+rest via Electron's `safeStorage`. The backup content itself keeps using
+the passphrase-based encryption above, not tied to the OAuth connection -
+that's what keeps a backup restorable on a brand new computer.
 
 ## Run it in development
 
