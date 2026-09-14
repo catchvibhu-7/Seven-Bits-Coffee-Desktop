@@ -126,6 +126,38 @@ body.theme-light {
    Global resets and primary brand colors.
    ========================================================================== */
 
+/* Themed scrollbar - the OS/browser default (a chunky light-grey bar in
+   Windows/Chromium) looks jarring against this app's dark terminal
+   aesthetic, especially inside the Electron build where it's the only
+   "native chrome" visible anywhere in the window. Chromium (this app's
+   actual runtime, whether via Electron or a Chromium-based browser) uses
+   the ::-webkit-scrollbar family below; scrollbar-width/-color are the
+   standardized equivalent for Firefox. Both read the same theme vars, so
+   switching branding colors or the light-theme toggle re-colors the
+   scrollbar too, with no separate rule to keep in sync. */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) var(--color-bg);
+}
+*::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+*::-webkit-scrollbar-track {
+    background: var(--color-bg);
+}
+*::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 6px;
+    border: 2px solid var(--color-bg);
+}
+*::-webkit-scrollbar-thumb:hover {
+    background: var(--color-accent);
+}
+*::-webkit-scrollbar-corner {
+    background: var(--color-bg);
+}
+
 /* Buttons/inputs had no custom focus style anywhere in this file, so clicking
    one (e.g. the view-toggle icons) left the browser's default focus ring
    showing - which is blue in Chromium regardless of branding, clashing with
