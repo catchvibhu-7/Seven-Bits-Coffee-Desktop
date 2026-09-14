@@ -61,6 +61,18 @@ adds:
   Help → Open Backups Folder. This is a rolling local safety net (undo a bad change from a few hours
   ago), not off-site disaster recovery - that's what the encrypted backup
   above is for.
+- **Order history compaction**: without this, `orders.json` (and therefore
+  every backup) grows forever. Once a day, any order older than a year has
+  its full line-item detail moved into `data/archives/orders-<YEAR>.json`
+  and its entry in `orders.json` shrinks to a summary (totals, tax
+  breakdown, payment method, customer info, item count - everything a
+  financial report needs, not the item-level breakdown). Nothing is
+  deleted, only relocated - opening an old order's detail in Admin Order
+  History still works, pulled from the archive on demand. Archives are
+  **not** part of routine backups by default (that's the whole point -
+  keeping them out is what actually bounds backup size) - check "INCLUDE
+  FULL ORDER HISTORY" on the encrypted backup screen for a true complete
+  copy including archived years.
 
 ### Automatic vs. manual backups
 
