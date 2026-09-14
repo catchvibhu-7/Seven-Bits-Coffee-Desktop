@@ -1,0 +1,6 @@
+# Shell scripts must keep LF line endings on every checkout, regardless of
+# a Windows clone's core.autocrlf setting - a CRLF shebang line
+# (`#!/bin/sh\r`) fails to execute on Linux, which is exactly where this
+# script is meant to run (inside the Docker image, built from whatever OS
+# happens to check this repo out first).
+*.sh text eol=lf
