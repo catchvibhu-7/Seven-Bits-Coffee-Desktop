@@ -6208,8 +6208,31 @@ const server = http.createServer(async (req, res) => {
   serveStatic(req, res, pathname);
 });
 
+// No host given to .listen() below (defaults to all interfaces, not just
+// localhost) - this was already true before this comment existed, it just
+// wasn't obvious from the call site alone. That's what makes a phone/tablet
+// on the same WiFi able to reach this machine's LAN IP at all; logging the
+// address here (and in main.js's startup dialog for the packaged app, which
+// has no visible console) just makes that already-working capability
+// discoverable instead of a silent accident.
+function getLanIPs() {
+  const nets = require("os").networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)) {
+    for (const iface of nets[name]) {
+      if (iface.family === "IPv4" && !iface.internal) ips.push(iface.address);
+    }
+  }
+  return ips;
+}
+
 server.listen(PORT, () => {
   console.log(`Seven Bits Coffee server running at http://localhost:${PORT}`);
+  const lanIPs = getLanIPs();
+  if (lanIPs.length > 0) {
+    console.log(`Also reachable from other devices on this network at:`);
+    lanIPs.forEach((ip) => console.log(`  http://${ip}:${PORT}`));
+  }
   const savedConfig = readJson(CONFIG_FILE, {});
   if (!UPI_VPA && !savedConfig.upiVpa) {
     console.log("Note: no UPI ID is set yet, so 'Pay Online' orders won't show a QR code.");

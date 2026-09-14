@@ -8,11 +8,43 @@
  * asking the user to open a browser to localhost themselves (the old
  * start.bat workflow this replaces).
  */
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, Menu, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 
 const PORT = 4173; // arbitrary fixed local port, unlikely to collide with anything else running on this machine
+
+/** Other devices on the same WiFi/LAN (a kitchen tablet, a second till, a
+ *  customer's phone) can reach this same server at one of these addresses -
+ *  server.js already binds to every interface, not just localhost, so this
+ *  is purely about making that already-working address discoverable. A
+ *  packaged app has no visible console (unlike `npm start` in a terminal),
+ *  so this needs to be shown IN the app - see showNetworkAddress() below. */
+function getLanIPs() {
+    const nets = os.networkInterfaces();
+    const ips = [];
+    for (const name of Object.keys(nets)) {
+        for (const iface of nets[name]) {
+            if (iface.family === "IPv4" && !iface.internal) ips.push(iface.address);
+        }
+    }
+    return ips;
+}
+
+function showNetworkAddress() {
+    const ips = getLanIPs();
+    const message =
+        ips.length > 0
+            ? `Other devices on this same WiFi/network can open this shop at:\n\n${ips.map((ip) => `http://${ip}:${PORT}`).join("\n")}\n\nUse http:// - this local server has no https certificate.`
+            : "No network connection was detected - connect this computer to WiFi or Ethernet, then check again from the menu (press Alt to show it).";
+    dialog.showMessageBox(mainWindow, {
+        type: "info",
+        title: "Network Address",
+        message,
+        buttons: ["OK"]
+    });
+}
 
 function seedWritableDirs() {
     const userDataDir = app.getPath("userData");
@@ -62,7 +94,7 @@ function createWindow() {
         minWidth: 1024,
         minHeight: 700,
         title: "Seven Bits Coffee",
-        autoHideMenuBar: true, // POS terminal look, not a browser chrome
+        autoHideMenuBar: true, // POS terminal look, not a browser chrome - still reachable with Alt, which is where "Network Address" lives
         webPreferences: {
             contextIsolation: true,
             nodeIntegration: false
@@ -74,6 +106,15 @@ function createWindow() {
 app.whenReady().then(() => {
     startServer();
     createWindow();
+    Menu.setApplicationMenu(
+        Menu.buildFromTemplate([
+            {
+                label: "Network",
+                submenu: [{ label: "Show Network Address", click: () => showNetworkAddress() }]
+            }
+        ])
+    );
+    showNetworkAddress(); // once on launch, so it's seen without hunting for the hidden menu bar
     app.on("activate", () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
