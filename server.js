@@ -61,6 +61,15 @@ const UPLOADS_DIR = process.env.SBC_UPLOADS_DIR || path.join(ROOT_DIR, "uploads"
 // visible console - see logEvent() further down and main.js's "Open Logs
 // Folder" menu item.
 const LOGS_DIR = process.env.SBC_LOGS_DIR || path.join(ROOT_DIR, "logs");
+// Automatic rolling local backups - one dated folder per calendar day, an
+// hourly snapshot written into whichever folder is "today's", folders older
+// than BACKUP_RETENTION_DAYS deleted. See the AUTOMATIC LOCAL BACKUPS
+// section further down for the scheduler itself. Unencrypted (unlike the
+// manual download-for-off-site-storage backup) - these never leave this
+// machine, so they carry the same exposure the live data/ files already
+// have sitting on this same disk, not a new one.
+const BACKUPS_DIR = process.env.SBC_BACKUPS_DIR || path.join(ROOT_DIR, "backups");
+const BACKUP_RETENTION_DAYS = 7;
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hour shift
 const IS_HTTPS = process.env.FORCE_SECURE_COOKIE === "1";
@@ -79,6 +88,7 @@ const PAYMENT_METHODS = ["UPI", "Card", "Cash", "Wallet"]; // recorded on an ord
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 fs.mkdirSync(LOGS_DIR, { recursive: true });
+fs.mkdirSync(BACKUPS_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
 // Event log - one plain-text file per calendar day, for troubleshooting a
@@ -3774,6 +3784,23 @@ const BACKUP_FILES = {
   "branding-profiles.json": BRANDING_PROFILES_FILE
 };
 
+/** Shared by the manual encrypted-download route below and the automatic
+ *  scheduled local backups (see AUTOMATIC LOCAL BACKUPS section further
+ *  down) - both need the exact same "every JSON record plus every actual
+ *  uploaded file" snapshot, just handled differently afterward (one gets
+ *  encrypted for download, the other gets gzipped straight to disk). */
+function buildBackupPayload() {
+  const files = {};
+  for (const [name, filePath] of Object.entries(BACKUP_FILES)) {
+    files[name] = readJson(filePath, null);
+  }
+  const uploads = {};
+  for (const filename of fs.readdirSync(UPLOADS_DIR)) {
+    uploads[filename] = fs.readFileSync(path.join(UPLOADS_DIR, filename)).toString("base64");
+  }
+  return { exportedAt: new Date().toISOString(), files, uploads };
+}
+
 route("GET", /^\/api\/admin\/backup\/?$/, async (req, res) => {
   const session = requireRole(req, res, ["owner"]);
   if (!session) return;
@@ -3799,19 +3826,11 @@ route("POST", /^\/api\/admin\/backup\/encrypted\/?$/, async (req, res) => {
     return sendJson(res, 400, { error: "Passphrase must be at least 8 characters" });
   }
 
-  const files = {};
-  for (const [name, filePath] of Object.entries(BACKUP_FILES)) {
-    files[name] = readJson(filePath, null);
-  }
-  const uploads = {};
-  for (const filename of fs.readdirSync(UPLOADS_DIR)) {
-    uploads[filename] = fs.readFileSync(path.join(UPLOADS_DIR, filename)).toString("base64");
-  }
-
-  const plaintext = zlib.gzipSync(Buffer.from(JSON.stringify({ exportedAt: new Date().toISOString(), files, uploads }), "utf8"));
+  const payload = buildBackupPayload();
+  const plaintext = zlib.gzipSync(Buffer.from(JSON.stringify(payload), "utf8"));
   const encrypted = encryptBackup(plaintext, passphrase);
 
-  logEvent("info", "Encrypted backup created", { by: session.name, uploadCount: Object.keys(uploads).length });
+  logEvent("info", "Encrypted backup created", { by: session.name, uploadCount: Object.keys(payload.uploads).length });
   res.writeHead(200, {
     "Content-Type": "application/octet-stream",
     "Content-Disposition": `attachment; filename="seven-bits-coffee-backup-${new Date().toISOString().slice(0, 10)}.sbcbackup"`
@@ -3951,6 +3970,68 @@ route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
   logEvent("warn", "Whole-instance restore applied (plain backup)", { restoredCount, by: session.name });
   sendJson(res, 200, { ok: true, restoredCount });
 });
+
+// ---------------------------------------------------------------------------
+// AUTOMATIC LOCAL BACKUPS - unattended, no passphrase (see BACKUPS_DIR's own
+// comment for why unencrypted is fine here). One dated folder per calendar
+// day (BACKUPS_DIR/YYYY-MM-DD/), an hourly snapshot written into whichever
+// folder is "today's" as the day goes on, folders older than
+// BACKUP_RETENTION_DAYS deleted entirely. This is a rolling local safety
+// net (undo a bad change from a few hours ago, recover from a corrupted
+// data file) - it's not what the manual encrypted backup above is for
+// (taking a copy off this machine for real disaster recovery).
+// ---------------------------------------------------------------------------
+
+function dateStamp(d) {
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD, always UTC - see cleanupOldBackups()'s own note on why that's fine
+}
+
+function runScheduledBackupIfDue() {
+  const now = new Date();
+  const dayFolder = path.join(BACKUPS_DIR, dateStamp(now));
+  const hourLabel = String(now.getHours()).padStart(2, "0");
+  const filePath = path.join(dayFolder, `backup-${hourLabel}00.json.gz`);
+  if (fs.existsSync(filePath)) return; // this hour's snapshot already exists - nothing to do until the next one
+
+  try {
+    fs.mkdirSync(dayFolder, { recursive: true });
+    const gz = zlib.gzipSync(Buffer.from(JSON.stringify(buildBackupPayload()), "utf8"));
+    fs.writeFileSync(filePath, gz);
+    logEvent("info", "Scheduled local backup created", { file: filePath, sizeBytes: gz.length });
+  } catch (e) {
+    logEvent("error", "Scheduled local backup failed", { message: e.message });
+  }
+
+  cleanupOldBackups();
+}
+
+function cleanupOldBackups() {
+  // Both sides of this comparison go through the same "YYYY-MM-DD string ->
+  // UTC midnight Date" parsing (bare-date strings parse as UTC per the
+  // ECMAScript spec, unlike `new Date()` itself which is local time) - as
+  // long as both sides are anchored the same way, the DIFFERENCE between
+  // them is still an exact whole-day count regardless of this machine's
+  // timezone, which is all that actually matters for a 7-day cutoff.
+  const todayUtcMidnight = new Date(dateStamp(new Date()));
+  let entries;
+  try {
+    entries = fs.readdirSync(BACKUPS_DIR, { withFileTypes: true });
+  } catch (e) {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(entry.name)) continue;
+    const daysOld = Math.round((todayUtcMidnight - new Date(entry.name)) / 86400000);
+    if (daysOld >= BACKUP_RETENTION_DAYS) {
+      try {
+        fs.rmSync(path.join(BACKUPS_DIR, entry.name), { recursive: true, force: true });
+        logEvent("info", "Deleted expired local backup folder", { folder: entry.name, daysOld });
+      } catch (e) {
+        logEvent("error", "Could not delete expired local backup folder", { folder: entry.name, message: e.message });
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Per-store backup/restore - same flat JSON files as the whole-instance
@@ -6431,4 +6512,13 @@ server.listen(PORT, () => {
     console.log("Set it from Admin > Global Settings > Payment Settings once logged in,");
     console.log("or via the UPI_VPA/UPI_PAYEE_NAME env vars before first boot.");
   }
+
+  // One immediately (so a machine that's never been up for a full hour
+  // still gets a first snapshot) then a cheap check every few minutes -
+  // deliberately not a single setInterval(fn, 1 hour), which would drift
+  // from real clock hours AND lose track of "have I already done this
+  // hour" across a restart. runScheduledBackupIfDue() re-derives that from
+  // whether this hour's file already exists on disk instead.
+  runScheduledBackupIfDue();
+  setInterval(runScheduledBackupIfDue, 5 * 60 * 1000);
 });

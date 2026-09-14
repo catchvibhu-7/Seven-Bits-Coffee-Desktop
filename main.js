@@ -51,8 +51,10 @@ function seedWritableDirs() {
     const dataDir = path.join(userDataDir, "data");
     const uploadsDir = path.join(userDataDir, "uploads");
     const logsDir = path.join(userDataDir, "logs");
+    const backupsDir = path.join(userDataDir, "backups");
     fs.mkdirSync(dataDir, { recursive: true });
     fs.mkdirSync(logsDir, { recursive: true });
+    fs.mkdirSync(backupsDir, { recursive: true });
 
     // First run only: copy the bundled branding/menu photos (shipped
     // read-only inside the app) into the writable uploads folder, so the
@@ -69,15 +71,16 @@ function seedWritableDirs() {
         }
     }
 
-    return { dataDir, uploadsDir, logsDir };
+    return { dataDir, uploadsDir, logsDir, backupsDir };
 }
 
 function startServer() {
-    const { dataDir, uploadsDir, logsDir } = seedWritableDirs();
+    const { dataDir, uploadsDir, logsDir, backupsDir } = seedWritableDirs();
     process.env.PORT = String(PORT);
     process.env.SBC_DATA_DIR = dataDir;
     process.env.SBC_UPLOADS_DIR = uploadsDir;
     process.env.SBC_LOGS_DIR = logsDir;
+    process.env.SBC_BACKUPS_DIR = backupsDir;
     // Same default owner credentials the web version's start.bat ships on
     // first run (see server-settings.bat there) - not a new pattern, and
     // changing it is one login + a trip to Account Settings away. Only
@@ -86,7 +89,7 @@ function startServer() {
     process.env.OWNER_USERNAME = process.env.OWNER_USERNAME || "owner";
     process.env.OWNER_PASSWORD = process.env.OWNER_PASSWORD || "changeme123";
     require("./server.js");
-    return logsDir;
+    return { logsDir, backupsDir };
 }
 
 let mainWindow;
@@ -113,7 +116,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-    const logsDir = startServer();
+    const { logsDir, backupsDir } = startServer();
     createWindow();
     Menu.setApplicationMenu(
         Menu.buildFromTemplate([
@@ -139,6 +142,16 @@ app.whenReady().then(() => {
                         // console to read it from otherwise.
                         label: "Open Logs Folder",
                         click: () => shell.openPath(logsDir)
+                    },
+                    {
+                        // The automatic hourly/daily local backups (see
+                        // runScheduledBackupIfDue() in server.js) - browsable
+                        // here for anyone who wants to manually copy the
+                        // whole folder to a USB drive now and then, on top
+                        // of whatever this local rolling window already
+                        // covers.
+                        label: "Open Backups Folder",
+                        click: () => shell.openPath(backupsDir)
                     }
                 ]
             }

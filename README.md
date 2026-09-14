@@ -47,6 +47,32 @@ adds:
   any crash get written to `logs/` (one plain-text file per day) -
   reachable via Help → Open Logs Folder. Separate from the in-app Admin
   Audit Log, which tracks staff actions, not troubleshooting events.
+- **Automatic local backups**: runs unattended, no passphrase needed (see
+  "Automatic vs. manual backups" below for why that's fine here). One
+  snapshot per hour, saved to `backups/YYYY-MM-DD/backup-HHMM.json.gz` -
+  each calendar day gets its own folder, and any folder older than 7 days
+  is deleted automatically. Browse them via Help → Open Backups Folder.
+  This is a rolling local safety net (undo a bad change from a few hours
+  ago), not off-site disaster recovery - that's what the encrypted backup
+  above is for.
+
+### Automatic vs. manual backups
+
+Two different problems, two different designs:
+
+|  | Automatic (`backups/`) | Manual encrypted (`.sbcbackup`) |
+|---|---|---|
+| Runs | Every hour, unattended | Only when you click the button |
+| Encrypted | No | Yes (AES-256-GCM, your passphrase) |
+| Retention | 7 days, then auto-deleted | Forever, until you delete the file |
+| Lives | On this same computer | Wherever you save/move it |
+| Protects against | "I fat-fingered something an hour ago" | This computer being lost, stolen, or dying |
+
+The automatic ones skip encryption because they never leave this machine -
+they sit next to the live `data/` files they're backing up, with the exact
+same exposure those already have. Encrypting them would just mean managing
+a passphrase for a background job that can't ask you for one, for no real
+security gain.
 
 ## Google Drive backup (not built yet - needs your input)
 
