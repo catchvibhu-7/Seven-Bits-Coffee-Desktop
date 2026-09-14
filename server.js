@@ -61,6 +61,7 @@ const UPLOADS_DIR = process.env.SBC_UPLOADS_DIR || path.join(ROOT_DIR, "uploads"
 // visible console - see logEvent() further down and main.js's "Open Logs
 // Folder" menu item.
 const LOGS_DIR = process.env.SBC_LOGS_DIR || path.join(ROOT_DIR, "logs");
+const LOG_RETENTION_DAYS = 30; // keeps a packaged app's log folder from growing forever - see cleanupOldLogs()
 // Automatic rolling local backups - one dated folder per calendar day, an
 // hourly snapshot written into whichever folder is "today's", folders older
 // than BACKUP_RETENTION_DAYS deleted. See the AUTOMATIC LOCAL BACKUPS
@@ -3972,14 +3973,18 @@ route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// AUTOMATIC LOCAL BACKUPS - unattended, no passphrase (see BACKUPS_DIR's own
-// comment for why unencrypted is fine here). One dated folder per calendar
-// day (BACKUPS_DIR/YYYY-MM-DD/), an hourly snapshot written into whichever
-// folder is "today's" as the day goes on, folders older than
-// BACKUP_RETENTION_DAYS deleted entirely. This is a rolling local safety
-// net (undo a bad change from a few hours ago, recover from a corrupted
-// data file) - it's not what the manual encrypted backup above is for
-// (taking a copy off this machine for real disaster recovery).
+// AUTOMATIC LOCAL BACKUPS + LOG CLEANUP - unattended, no passphrase (see
+// BACKUPS_DIR's own comment for why unencrypted is fine here). One dated
+// folder per calendar day (BACKUPS_DIR/YYYY-MM-DD/), an hourly snapshot
+// written into whichever folder is "today's" as the day goes on, folders
+// older than BACKUP_RETENTION_DAYS deleted entirely - except the single
+// most recent one, kept no matter its age (see cleanupOldBackups()). This
+// is a rolling local safety net (undo a bad change from a few hours ago,
+// recover from a corrupted data file) - it's not what the manual encrypted
+// backup above is for (taking a copy off this machine for real disaster
+// recovery). Piggybacks LOGS_DIR's own retention (cleanupOldLogs(), same
+// "never delete the last one" rule) onto this same cadence rather than
+// running a second independent timer for it.
 // ---------------------------------------------------------------------------
 
 function dateStamp(d) {
@@ -4003,6 +4008,7 @@ function runScheduledBackupIfDue() {
   }
 
   cleanupOldBackups();
+  cleanupOldLogs();
 }
 
 function cleanupOldBackups() {
@@ -4019,15 +4025,57 @@ function cleanupOldBackups() {
   } catch (e) {
     return;
   }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(entry.name)) continue;
-    const daysOld = Math.round((todayUtcMidnight - new Date(entry.name)) / 86400000);
+  const dateFolders = entries
+    .filter((e) => e.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(e.name))
+    .map((e) => e.name)
+    .sort(); // ISO date strings sort lexicographically = chronologically
+  if (dateFolders.length === 0) return;
+  // Never delete the single most recent backup, no matter how old it's
+  // gotten - if this app hasn't been opened in longer than the retention
+  // window, that backup is the ONLY copy of anything that exists. Losing
+  // it to a routine cleanup pass the moment the app happens to reopen
+  // would be exactly backwards - the longer the gap, the more that one
+  // backup matters, not less.
+  const mostRecent = dateFolders[dateFolders.length - 1];
+  for (const name of dateFolders) {
+    if (name === mostRecent) continue;
+    const daysOld = Math.round((todayUtcMidnight - new Date(name)) / 86400000);
     if (daysOld >= BACKUP_RETENTION_DAYS) {
       try {
-        fs.rmSync(path.join(BACKUPS_DIR, entry.name), { recursive: true, force: true });
-        logEvent("info", "Deleted expired local backup folder", { folder: entry.name, daysOld });
+        fs.rmSync(path.join(BACKUPS_DIR, name), { recursive: true, force: true });
+        logEvent("info", "Deleted expired local backup folder", { folder: name, daysOld });
       } catch (e) {
-        logEvent("error", "Could not delete expired local backup folder", { folder: entry.name, message: e.message });
+        logEvent("error", "Could not delete expired local backup folder", { folder: name, message: e.message });
+      }
+    }
+  }
+}
+
+function cleanupOldLogs() {
+  const todayUtcMidnight = new Date(dateStamp(new Date()));
+  let entries;
+  try {
+    entries = fs.readdirSync(LOGS_DIR);
+  } catch (e) {
+    return;
+  }
+  const logFiles = entries.filter((name) => /^app-\d{4}-\d{2}-\d{2}\.log$/.test(name)).sort();
+  if (logFiles.length === 0) return;
+  // Same "never delete the last one" reasoning as cleanupOldBackups() above
+  // - today's own file is always the most recent, so this also guarantees
+  // logEvent() never tries to delete the very file it might be about to
+  // append to.
+  const mostRecent = logFiles[logFiles.length - 1];
+  for (const name of logFiles) {
+    if (name === mostRecent) continue;
+    const dateStr = name.slice(4, 14); // "app-YYYY-MM-DD.log" - strip the "app-" prefix and ".log" suffix
+    const daysOld = Math.round((todayUtcMidnight - new Date(dateStr)) / 86400000);
+    if (daysOld >= LOG_RETENTION_DAYS) {
+      try {
+        fs.unlinkSync(path.join(LOGS_DIR, name));
+        logEvent("info", "Deleted expired log file", { file: name, daysOld });
+      } catch (e) {
+        logEvent("error", "Could not delete expired log file", { file: name, message: e.message });
       }
     }
   }
