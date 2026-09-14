@@ -50,7 +50,9 @@ function seedWritableDirs() {
     const userDataDir = app.getPath("userData");
     const dataDir = path.join(userDataDir, "data");
     const uploadsDir = path.join(userDataDir, "uploads");
+    const logsDir = path.join(userDataDir, "logs");
     fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(logsDir, { recursive: true });
 
     // First run only: copy the bundled branding/menu photos (shipped
     // read-only inside the app) into the writable uploads folder, so the
@@ -67,14 +69,15 @@ function seedWritableDirs() {
         }
     }
 
-    return { dataDir, uploadsDir };
+    return { dataDir, uploadsDir, logsDir };
 }
 
 function startServer() {
-    const { dataDir, uploadsDir } = seedWritableDirs();
+    const { dataDir, uploadsDir, logsDir } = seedWritableDirs();
     process.env.PORT = String(PORT);
     process.env.SBC_DATA_DIR = dataDir;
     process.env.SBC_UPLOADS_DIR = uploadsDir;
+    process.env.SBC_LOGS_DIR = logsDir;
     // Same default owner credentials the web version's start.bat ships on
     // first run (see server-settings.bat there) - not a new pattern, and
     // changing it is one login + a trip to Account Settings away. Only
@@ -83,6 +86,7 @@ function startServer() {
     process.env.OWNER_USERNAME = process.env.OWNER_USERNAME || "owner";
     process.env.OWNER_PASSWORD = process.env.OWNER_PASSWORD || "changeme123";
     require("./server.js");
+    return logsDir;
 }
 
 let mainWindow;
@@ -109,7 +113,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-    startServer();
+    const logsDir = startServer();
     createWindow();
     Menu.setApplicationMenu(
         Menu.buildFromTemplate([
@@ -127,6 +131,14 @@ app.whenReady().then(() => {
                         // just reachable again afterward without reinstalling.
                         label: "Terms & Privacy",
                         click: () => shell.openPath(path.join(__dirname, "TERMS_AND_PRIVACY.txt"))
+                    },
+                    {
+                        // One place to find the diagnostic event log (see
+                        // logEvent() in server.js) when something needs
+                        // troubleshooting - this packaged app has no visible
+                        // console to read it from otherwise.
+                        label: "Open Logs Folder",
+                        click: () => shell.openPath(logsDir)
                     }
                 ]
             }

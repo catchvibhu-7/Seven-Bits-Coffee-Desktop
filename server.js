@@ -53,6 +53,13 @@ const SEED_DIR = path.join(ROOT_DIR, "data-seed");
 // entirely means a future change to data/'s own handling can't accidentally
 // re-expose it alongside them.
 const UPLOADS_DIR = process.env.SBC_UPLOADS_DIR || path.join(ROOT_DIR, "uploads");
+// Diagnostic event log (boot, crashes, orders placed, auth attempts) -
+// distinct from AUDIT_LOG_FILE below, which is a business-facing record of
+// staff actions (owner-readable in the admin panel). This one is a plain
+// per-day text file meant for troubleshooting a packaged app that has no
+// visible console - see logEvent() further down and main.js's "Open Logs
+// Folder" menu item.
+const LOGS_DIR = process.env.SBC_LOGS_DIR || path.join(ROOT_DIR, "logs");
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hour shift
 const IS_HTTPS = process.env.FORCE_SECURE_COOKIE === "1";
@@ -70,6 +77,40 @@ const PAYMENT_METHODS = ["UPI", "Card", "Cash", "Wallet"]; // recorded on an ord
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+fs.mkdirSync(LOGS_DIR, { recursive: true });
+
+// ---------------------------------------------------------------------------
+// Event log - one plain-text file per calendar day, for troubleshooting a
+// packaged app that has no visible console. Deliberately dumb (no rotation/
+// deletion of old files, no external logging library) - a coffee shop's log
+// volume is tiny, and a human occasionally deleting last month's .log files
+// by hand is simpler than building retention policy for a problem this
+// small.
+// ---------------------------------------------------------------------------
+
+function logEvent(level, message, meta) {
+  const line = `${new Date().toISOString()} [${level.toUpperCase()}] ${message}${meta ? " " + JSON.stringify(meta) : ""}\n`;
+  const file = path.join(LOGS_DIR, `app-${new Date().toISOString().slice(0, 10)}.log`);
+  try {
+    fs.appendFileSync(file, line);
+  } catch (e) {
+    // Logging must never be why a request fails - fall back to the console,
+    // which is at least visible when run via `node server.js`/`npm start`.
+    console.error("Could not write to log file:", e.message);
+  }
+  if (level === "error") console.error(line.trim());
+}
+
+// Without these, an uncaught error anywhere crashes the whole process with
+// no trace for anyone using the packaged app (no visible console there,
+// unlike `node server.js` in a terminal) - now it's at least on disk before
+// the process goes down.
+process.on("uncaughtException", (err) => {
+  logEvent("error", "Uncaught exception", { message: err.message, stack: err.stack });
+});
+process.on("unhandledRejection", (reason) => {
+  logEvent("error", "Unhandled promise rejection", { reason: reason instanceof Error ? reason.message : String(reason) });
+});
 
 // ---------------------------------------------------------------------------
 // Tiny JSON file "database" helpers
@@ -1405,18 +1446,22 @@ route("POST", /^\/api\/auth\/login\/?$/, async (req, res) => {
 
   if (!user || !verifyPassword(body.password, user.salt, user.hash)) {
     recordAuthFailure(ip);
+    logEvent("warn", "Login failed - bad credentials", { attemptedUsername: body.username, ip });
     return sendJson(res, 401, { error: "Invalid username or password" });
   }
   if (user.disabled) {
     recordAuthFailure(ip);
+    logEvent("warn", "Login failed - account disabled", { username: user.username, ip });
     return sendJson(res, 401, { error: "This account has been deactivated. Contact your manager or the owner." });
   }
   if (user.accountDeleted) {
     recordAuthFailure(ip);
+    logEvent("warn", "Login failed - account deleted", { username: user.username, ip });
     return sendJson(res, 401, { error: "This account has been deleted." });
   }
 
   recordAuthSuccess(ip);
+  logEvent("info", "Login succeeded", { username: user.username, role: user.role, ip });
   const token = createSession({ role: user.role, userId: user.id, name: user.name, phone: user.phone, storeId: user.storeId, storeAccess: user.storeAccess || null });
   setSessionCookie(res, token, req);
   sendJson(res, 200, { role: user.role, name: user.name, phone: user.phone, storeId: user.storeId, mustChangePassword: !!user.mustChangePassword });
@@ -4439,6 +4484,7 @@ route("POST", /^\/api\/orders\/?$/, async (req, res) => {
   }
 
   broadcastOrdersChanged();
+  logEvent("info", "Order placed", { orderId: order.id, orderNumber: order.orderNumber, total: order.total, orderType: order.orderType });
   sendJson(res, 201, order);
 });
 
@@ -6237,6 +6283,7 @@ route("GET", /^\/api\/network-info\/?$/, async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Seven Bits Coffee server running at http://localhost:${PORT}`);
+  logEvent("info", "Server started", { port: PORT });
   const lanIPs = getLanIPs();
   if (lanIPs.length > 0) {
     console.log(`Also reachable from other devices on this network at:`);

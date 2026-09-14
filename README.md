@@ -55,6 +55,13 @@ Where your data actually lives (not inside the app folder — see above):
 - macOS: `~/Library/Application Support/seven-bits-coffee-desktop/data`
 - Linux: `~/.config/seven-bits-coffee-desktop/data`
 
+`...\logs\` sits next to `data\` - a plain-text, one-file-per-day event log
+(server start, login attempts, orders placed, and any crash) for
+troubleshooting, since a packaged app has no visible console. Reach it
+anytime via **Help → Open Logs Folder** in the app's menu (press Alt to
+show the menu bar). This is separate from the in-app Admin Audit Log, which
+tracks staff actions (config/menu changes etc.), not diagnostic events.
+
 ## Build an installer
 
 ```bash
