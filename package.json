@@ -4,6 +4,7 @@
   "description": "Seven Bits Coffee POS, packaged as a desktop app - an Electron wrapper around the existing zero-dependency Node backend, no separate build step for the app itself.",
   "main": "main.js",
   "private": true,
+  "author": "Seven Bits Coffee",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
@@ -25,13 +26,19 @@
       "css/**/*",
       "js/**/*",
       "uploads/**/*",
-      "data-seed/**/*"
+      "data-seed/**/*",
+      "TERMS_AND_PRIVACY.txt"
     ],
     "directories": {
       "output": "dist"
     },
     "win": {
       "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "license": "TERMS_AND_PRIVACY.txt"
     },
     "mac": {
       "target": "dmg",

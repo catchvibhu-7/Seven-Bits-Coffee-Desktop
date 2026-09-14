@@ -6226,6 +6226,15 @@ function getLanIPs() {
   return ips;
 }
 
+// Lets the staff home page show the LAN address as a card (see
+// staff-home.js) instead of only being visible in main.js's startup dialog
+// or a terminal's console output - staff can look it up anytime to hand to
+// someone setting up a second till or a kitchen tablet.
+route("GET", /^\/api\/network-info\/?$/, async (req, res) => {
+  if (!requireRole(req, res, KITCHEN_ROLES)) return;
+  sendJson(res, 200, { port: PORT, urls: getLanIPs().map((ip) => `http://${ip}:${PORT}`) });
+});
+
 server.listen(PORT, () => {
   console.log(`Seven Bits Coffee server running at http://localhost:${PORT}`);
   const lanIPs = getLanIPs();

@@ -8,7 +8,7 @@
  * asking the user to open a browser to localhost themselves (the old
  * start.bat workflow this replaces).
  */
-const { app, BrowserWindow, Menu, dialog } = require("electron");
+const { app, BrowserWindow, Menu, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -111,6 +111,19 @@ app.whenReady().then(() => {
             {
                 label: "Network",
                 submenu: [{ label: "Show Network Address", click: () => showNetworkAddress() }]
+            },
+            {
+                label: "Help",
+                submenu: [
+                    {
+                        // Opens with the OS's own default text-file handler
+                        // (Notepad, etc.) rather than a custom in-app viewer -
+                        // the same shown-and-accepted-at-install-time file,
+                        // just reachable again afterward without reinstalling.
+                        label: "Terms & Privacy",
+                        click: () => shell.openPath(path.join(__dirname, "TERMS_AND_PRIVACY.txt"))
+                    }
+                ]
             }
         ])
     );

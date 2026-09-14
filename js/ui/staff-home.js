@@ -62,6 +62,18 @@ export async function renderStaffHome(session) {
     } catch (e) {
         menuItems = [];
     }
+
+    // Desktop-app-only feature (the web version has no LAN address of its
+    // own to share) - the route just 404s/errors on a plain web deployment,
+    // which this card silently treats the same as "nothing to show" rather
+    // than surfacing an error for something that was never applicable there.
+    let networkUrls = [];
+    try {
+        const res = await fetch("/api/network-info");
+        if (res.ok) networkUrls = (await res.json()).urls || [];
+    } catch (e) {
+        networkUrls = [];
+    }
     const lowStock = menuItems
         .filter((m) => m.stockCount != null && m.stockCount <= LOW_STOCK_THRESHOLD)
         .sort((a, b) => a.stockCount - b.stockCount)
@@ -156,6 +168,24 @@ export async function renderStaffHome(session) {
                         <div style="font-size:11px; color:var(--color-text-muted); margin-top:10px; line-height:1.6;">Print from Billing when a ticket's ready &middot; STATION 1 BARISTA &middot; STATION 2 KITCHEN &middot; STATION 3 DESSERTS</div>
                         <button type="button" id="staff-home-billing" style="margin-top:16px; width:100%; padding:11px; background:transparent; border:2px solid var(--color-accent); color:var(--color-accent); font-size:12px; font-weight:bold; letter-spacing:.12em; text-transform:uppercase; cursor:pointer; min-height:44px;">Open billing</button>
                     </div>
+                    ${
+                        networkUrls.length > 0
+                            ? `<div class="staff-widget-card" style="padding:18px 20px;">
+                        <h2 style="font-size:13px; font-weight:bold; letter-spacing:.22em; margin:0 0 6px; text-transform:uppercase; color:var(--color-accent);">Network address</h2>
+                        <p style="font-size:11px; color:var(--color-text-muted); margin:6px 0 12px;">Give this to anyone setting up a second till or kitchen tablet on this WiFi.</p>
+                        ${networkUrls
+                            .map(
+                                (url, i) => `
+                            <div style="display:flex; align-items:center; gap:8px; padding:8px 0; ${i > 0 ? "border-top:1px dashed var(--color-border);" : ""}">
+                                <code style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; color:var(--color-text);">${escapeHtml(url)}</code>
+                                <button type="button" class="staff-home-copy-url" data-url="${escapeHtml(url)}" style="flex:none; padding:6px 10px; background:transparent; border:1px solid var(--color-accent); color:var(--color-accent); font-size:10px; font-weight:bold; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; min-height:32px;">Copy</button>
+                            </div>
+                        `
+                            )
+                            .join("")}
+                    </div>`
+                            : ""
+                    }
                     <div class="staff-widget-card" style="padding:18px 20px;">
                         <h2 style="font-size:13px; font-weight:bold; letter-spacing:.22em; margin:0 0 6px; text-transform:uppercase; color:var(--color-danger);">! Low stock</h2>
                         ${
@@ -181,6 +211,19 @@ export async function renderStaffHome(session) {
     root.querySelector("#staff-home-new-order")?.addEventListener("click", () => window.showPage("menu"));
     root.querySelector("#staff-home-all-orders")?.addEventListener("click", () => window.showPage("kitchen"));
     root.querySelector("#staff-home-billing")?.addEventListener("click", () => window.showPage("billing"));
+    root.querySelectorAll(".staff-home-copy-url").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            try {
+                await navigator.clipboard.writeText(btn.dataset.url);
+                const original = btn.textContent;
+                btn.textContent = "Copied!";
+                setTimeout(() => (btn.textContent = original), 1500);
+            } catch (e) {
+                // Clipboard permission denied/unavailable - the address is
+                // still right there in the card's own text to read off.
+            }
+        });
+    });
     root.querySelectorAll(".staff-home-order-row").forEach((row) => {
         const openRow = () => window.showPage("kitchen");
         row.addEventListener("click", openRow);

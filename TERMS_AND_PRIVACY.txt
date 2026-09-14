@@ -1,0 +1,67 @@
+SEVEN BITS COFFEE - DESKTOP APP
+TERMS OF USE & DATA NOTICE
+
+*** THIS IS A GENERIC TEMPLATE, NOT LEGAL ADVICE ***
+This document was drafted as a placeholder for a software installer step.
+It has not been reviewed by a lawyer. Before relying on it for a real
+business - especially one handling customer names, phone numbers, and
+payment activity - have it reviewed by a qualified professional familiar
+with the consumer-protection, data-protection, and payment regulations
+that apply in your country/state (e.g. India's DPDP Act, GDPR if you ever
+serve EU customers, PCI-DSS obligations around payment handling).
+
+
+1. WHAT THIS SOFTWARE IS
+
+This is point-of-sale and order-management software, installed and run
+entirely on your own computer, for use in operating a coffee shop or
+similar business. It is provided to you as-is, for use in your own
+business.
+
+
+2. NO WARRANTY
+
+This software is provided "AS IS", without warranty of any kind, express
+or implied, including but not limited to warranties of merchantability,
+fitness for a particular purpose, and non-infringement. You assume all
+risk from using it, including the risk of data loss, calculation errors,
+or business interruption. In no event shall the developer be liable for
+any claim, damages, or other liability arising from the use of this
+software.
+
+
+3. WHERE YOUR DATA LIVES
+
+All data this software creates - menu items, orders, staff accounts,
+customer names and phone numbers, uploaded photos, and settings - is
+stored ONLY on this computer, in plain JSON files under this Windows
+user's AppData folder. Nothing is uploaded to the developer, and there is
+no analytics or telemetry of any kind built into this software.
+
+The one exception: if you configure online payment processing (a Razorpay
+account), payment transactions are sent to Razorpay to be processed,
+governed by Razorpay's own terms and privacy policy - not this one.
+
+Because everything lives in local files with no automatic cloud backup,
+YOU are responsible for backing up this computer regularly. Losing this
+computer (theft, hardware failure) without a backup means losing this
+data permanently.
+
+
+4. YOU ARE THE DATA CONTROLLER
+
+Any customer or employee personal data this software stores (names, phone
+numbers, order history) is collected and controlled by YOUR business, not
+by the developer of this software. You are responsible for complying with
+whatever privacy/data-protection laws apply to your business and
+location regarding that data - this software is a tool for storing it,
+not a compliance solution.
+
+Change the default administrator password immediately after installing,
+and take reasonable steps to secure physical and network access to this
+computer, since local files are only as safe as the device they're on.
+
+
+5. ACCEPTANCE
+
+By clicking "I Agree" during installation, you accept the above.
