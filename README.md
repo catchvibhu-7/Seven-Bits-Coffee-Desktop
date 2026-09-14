@@ -79,14 +79,27 @@ lands in `%LOCALAPPDATA%\Programs\seven-bits-coffee-desktop\`, separate
 from the actual data (see above) so uninstalling never touches your orders/
 menu/uploads.
 
-### App icon
+### App icon (customizable per shop)
 
-Not set yet — `electron-builder` falls back to a generic Electron icon
-until one is provided. To add one: drop a square PNG (512x512 or 1024x1024
-recommended) at `build/icon.png` and add `"icon": "build/icon.png"` under
-both `build.win` and the top-level `build` key in `package.json` (electron-
-builder generates the platform-specific `.ico`/`.icns` from it
-automatically at build time) — then rebuild.
+This app is meant to be re-branded per install, so the icon isn't hardcoded
+- `package.json`'s `build.icon` always points at the one fixed path
+`build/icon.png` (committed to this repo, currently generated from Seven
+Bits Coffee's own logo), and `main.js` uses that same file for the runtime
+window/taskbar icon. electron-builder generates every platform-specific
+format (`.ico`/`.icns`/PNGs) from it automatically at build time.
+
+**To use a different shop's logo**, no code editing needed:
+
+```bash
+npm run icon -- path/to/your-logo.png
+npm run dist:win
+```
+
+`scripts/generate-icon.js` fits whatever image you give it (any
+size/aspect ratio) onto a square 1024x1024 canvas without cropping or
+stretching it, and overwrites `build/icon.png` in place. Uses `jimp`
+(pure JavaScript, no native build step) - the only devDependency this
+added.
 
 ## Connecting from other devices on the same WiFi
 

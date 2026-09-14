@@ -7,6 +7,7 @@
   "author": "Seven Bits Coffee",
   "scripts": {
     "start": "electron .",
+    "icon": "node scripts/generate-icon.js",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
@@ -14,11 +15,13 @@
   },
   "devDependencies": {
     "electron": "^32.0.0",
-    "electron-builder": "^25.0.0"
+    "electron-builder": "^25.0.0",
+    "jimp": "^1.6.1"
   },
   "build": {
     "appId": "com.sevenbitscoffee.desktop",
     "productName": "Seven Bits Coffee",
+    "icon": "build/icon.png",
     "files": [
       "main.js",
       "server.js",

@@ -94,6 +94,11 @@ function createWindow() {
         minWidth: 1024,
         minHeight: 700,
         title: "Seven Bits Coffee",
+        // Same build/icon.png the installer uses (see scripts/generate-icon.js)
+        // - the exe/installer icon and this runtime window/taskbar icon are
+        // two separate things electron-builder doesn't wire together on its
+        // own, so both need to point at the one customization file.
+        icon: path.join(__dirname, "build", "icon.png"),
         autoHideMenuBar: true, // POS terminal look, not a browser chrome - still reachable with Alt, which is where "Network Address" lives
         webPreferences: {
             contextIsolation: true,
