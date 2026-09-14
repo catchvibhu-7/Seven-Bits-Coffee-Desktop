@@ -33,6 +33,7 @@
       "js/**/*",
       "uploads/**/*",
       "data-seed/**/*",
+      "build/icon.png",
       "build/variant.json",
       "TERMS_AND_PRIVACY.txt"
     ],
