@@ -4020,6 +4020,31 @@ route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
   sendJson(res, 200, { ok: true, restoredCount });
 });
 
+// Loads the sample menu/branding/uploads bundled with this app (data-seed/
+// demo-backup.json - built once from a real shop's catalog, scrubbed of
+// every user/order/staff-activity file) so a brand new install isn't a
+// totally blank shop when you just want to look around. Same destructive
+// class as the plain restore above (overwrites current menu/config/combos/
+// coupons/stores/branding), so it gets the same Global-Admin gate and
+// confirmYes requirement - just reads a file already on disk instead of
+// one the caller uploads.
+route("POST", /^\/api\/admin\/restore\/demo\/?$/, async (req, res) => {
+  const session = requireGlobalAdmin(req, res);
+  if (!session) return;
+  const body = await readBody(req);
+  if (!body.confirmYes) {
+    return sendJson(res, 400, { error: "Missing confirmation" });
+  }
+  const demoPath = path.join(SEED_DIR, "demo-backup.json");
+  const payload = readJson(demoPath, null);
+  if (!payload || !payload.files) {
+    return sendJson(res, 404, { error: "No demo data bundled with this build" });
+  }
+  const { restoredCount, uploadsRestored } = applyBackupPayload({ files: payload.files, uploads: payload.uploads });
+  logEvent("warn", "Demo data loaded", { restoredCount, uploadsRestored, by: session.name });
+  sendJson(res, 200, { ok: true, restoredCount, uploadsRestored });
+});
+
 // ---------------------------------------------------------------------------
 // AUTOMATIC LOCAL BACKUPS + LOG CLEANUP - unattended, no passphrase (see
 // BACKUPS_DIR's own comment for why unencrypted is fine here). One dated

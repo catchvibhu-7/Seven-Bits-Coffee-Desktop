@@ -1172,6 +1172,10 @@ export const AdminPortal = {
                 ${
                     canRestore
                         ? `
+                <h3 style="margin-top:25px; border-top:1px solid var(--color-border); padding-top:20px;">DEMO DATA</h3>
+                <p class="admin-help-text">Loads a sample menu, branding, and photos bundled with this app - a quick way to see it populated instead of blank. Overwrites current menu, combos, coupons, stores, and branding. Never touches staff accounts or order history.</p>
+                <button class="admin-btn-secondary" id="demo-load" style="border-color:var(--color-danger); color:var(--color-danger);">LOAD DEMO DATA</button>
+
                 <h3 style="margin-top:25px; border-top:1px solid var(--color-border); padding-top:20px;">RESTORE</h3>
                 <p class="admin-help-text" style="color:var(--color-danger);">Overwrites current data with whatever's in the backup file - menu, orders, staff accounts, everything it contains. This can't be undone. Only restore a backup you trust.</p>
                 <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
@@ -1268,6 +1272,33 @@ export const AdminPortal = {
         });
 
         if (!canRestore) return;
+
+        document.getElementById("demo-load").addEventListener("click", () => {
+            renderInfoModal({
+                title: "LOAD DEMO DATA",
+                message: "This will overwrite the current menu, combos, coupons, stores, and branding with sample content. Staff accounts and order history are left alone. This can't be undone. Continue?",
+                confirmText: "LOAD DEMO DATA",
+                cancelText: "CANCEL",
+                onConfirm: async () => {
+                    const errorEl = document.getElementById("backup-error");
+                    errorEl.textContent = "";
+                    try {
+                        const res = await fetch("/api/admin/restore/demo", {
+                            method: "POST",
+                            credentials: "include",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ confirmYes: true })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || "Could not load demo data");
+                        ok(`Loaded demo data (${data.restoredCount} file(s), ${data.uploadsRestored} photo(s)) - reloading…`);
+                        setTimeout(() => window.location.reload(), 1200);
+                    } catch (e) {
+                        errorEl.textContent = e.message || "Could not load demo data";
+                    }
+                }
+            });
+        });
 
         let encryptedRestoreFile = null;
         const erestoreBtn = document.getElementById("erestore-upload");
