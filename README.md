@@ -44,15 +44,21 @@ adds:
   puts back settings, orders, AND the photos. Not wired to auto-upload to
   Google Drive yet - see the next section.
 - **Diagnostic event log**: server boot, login attempts, orders placed, and
-  any crash get written to `logs/` (one plain-text file per day) -
-  reachable via Help → Open Logs Folder. Separate from the in-app Admin
-  Audit Log, which tracks staff actions, not troubleshooting events.
+  any crash get written to `logs/` (one plain-text file per day, kept for
+  30 days) - reachable via Help → Open Logs Folder. Separate from the
+  in-app Admin Audit Log, which tracks staff actions, not troubleshooting
+  events.
 - **Automatic local backups**: runs unattended, no passphrase needed (see
   "Automatic vs. manual backups" below for why that's fine here). One
   snapshot per hour, saved to `backups/YYYY-MM-DD/backup-HHMM.json.gz` -
   each calendar day gets its own folder, and any folder older than 7 days
-  is deleted automatically. Browse them via Help → Open Backups Folder.
-  This is a rolling local safety net (undo a bad change from a few hours
+  is deleted automatically - **except the single most recent one, which is
+  never deleted no matter its age**. That matters if this computer goes
+  unused for a while: the first backup after reopening it is the only copy
+  that exists until a fresh one is made, so pruning it away on the very
+  next cleanup pass would be exactly backwards. The same "keep the last
+  one" rule applies to the log retention above. Browse backups via
+  Help → Open Backups Folder. This is a rolling local safety net (undo a bad change from a few hours
   ago), not off-site disaster recovery - that's what the encrypted backup
   above is for.
 
