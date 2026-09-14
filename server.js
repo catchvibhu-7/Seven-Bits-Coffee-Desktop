@@ -32,6 +32,7 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const zlib = require("zlib");
 const { URL } = require("url");
 
 // ---------------------------------------------------------------------------
@@ -3708,10 +3709,50 @@ route("DELETE", /^\/api\/uploads\/(?<id>[\w-]+)\/?$/, async (req, res, params, u
 // live data), so it's owner-only and requires the same "confirmYes"-style
 // explicit body flag the client's confirm dialog sets, not just a valid
 // file upload - a stray automated retry can't wipe live data by accident.
-// Uploaded images themselves (uploads/*.svg etc.) are NOT included - only
-// their metadata (uploads.json) is, same as everything else here being
-// metadata/records rather than binary blobs.
+//
+// Two backup formats, for two different purposes:
+//  - Plain JSON (GET /api/admin/backup below) - human-readable, no
+//    passphrase, quick manual export/import. Doesn't include the actual
+//    uploaded image files (uploads/*.jpg etc.), only their metadata
+//    (uploads.json) - fine for a quick local safety net, not a full disaster-
+//    recovery copy.
+//  - Encrypted (POST /api/admin/backup/encrypted below) - the same data PLUS
+//    the real uploaded files, gzipped then AES-256-GCM encrypted with a
+//    passphrase the owner sets and must remember (there is no recovery if
+//    it's forgotten - that's what makes it real encryption, not just
+//    obfuscation). Meant to be stored somewhere off this machine (Google
+//    Drive, a USB drive, wherever) since it's the one that can rebuild
+//    everything - settings, orders, uploaded photos - on a brand new
+//    computer after this one is lost, stolen, or dies.
 // ---------------------------------------------------------------------------
+
+/** AES-256-GCM, key derived from the passphrase via scrypt (deliberately
+ *  slow - resists brute-forcing a weak passphrase far better than a fast
+ *  hash would). Layout: [salt(16)][iv(12)][authTag(16)][ciphertext...] - the
+ *  salt and IV aren't secret, they just need to never repeat, and shipping
+ *  them alongside the ciphertext is the normal way to do that. A wrong
+ *  passphrase or any tampering makes decryptBackup() throw (GCM's built-in
+ *  integrity check) rather than silently returning garbage. */
+function encryptBackup(buffer, passphrase) {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.scryptSync(passphrase, salt, 32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(buffer), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return Buffer.concat([salt, iv, authTag, ciphertext]);
+}
+
+function decryptBackup(payload, passphrase) {
+  const salt = payload.subarray(0, 16);
+  const iv = payload.subarray(16, 28);
+  const authTag = payload.subarray(28, 44);
+  const ciphertext = payload.subarray(44);
+  const key = crypto.scryptSync(passphrase, salt, 32);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]); // throws on wrong passphrase / corrupted file
+}
 const BACKUP_FILES = {
   "config.json": CONFIG_FILE,
   "menu.json": MENU_FILE,
@@ -3749,23 +3790,77 @@ route("GET", /^\/api\/admin\/backup\/?$/, async (req, res) => {
   res.end(body);
 });
 
-// Whole-instance restore is the single most destructive route in the app -
-// tightened to Global Admin only (owner keeps read/download above, but
-// never writes here, matching read-only-outside-adding-Global-Admins).
-route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
-  if (!requireGlobalAdmin(req, res)) return;
+route("POST", /^\/api\/admin\/backup\/encrypted\/?$/, async (req, res) => {
+  const session = requireRole(req, res, ["owner"]);
+  if (!session) return;
+  const body = await readBody(req);
+  const passphrase = String(body.passphrase || "");
+  if (passphrase.length < 8) {
+    return sendJson(res, 400, { error: "Passphrase must be at least 8 characters" });
+  }
+
+  const files = {};
+  for (const [name, filePath] of Object.entries(BACKUP_FILES)) {
+    files[name] = readJson(filePath, null);
+  }
+  const uploads = {};
+  for (const filename of fs.readdirSync(UPLOADS_DIR)) {
+    uploads[filename] = fs.readFileSync(path.join(UPLOADS_DIR, filename)).toString("base64");
+  }
+
+  const plaintext = zlib.gzipSync(Buffer.from(JSON.stringify({ exportedAt: new Date().toISOString(), files, uploads }), "utf8"));
+  const encrypted = encryptBackup(plaintext, passphrase);
+
+  logEvent("info", "Encrypted backup created", { by: session.name, uploadCount: Object.keys(uploads).length });
+  res.writeHead(200, {
+    "Content-Type": "application/octet-stream",
+    "Content-Disposition": `attachment; filename="seven-bits-coffee-backup-${new Date().toISOString().slice(0, 10)}.sbcbackup"`
+  });
+  res.end(encrypted);
+});
+
+// Same destructive-action gating as the plain restore above (Global Admin
+// only, explicit confirmYes) plus a passphrase that has to actually decrypt
+// something - a wrong passphrase or a corrupted/tampered file fails loudly
+// (see decryptBackup()) rather than restoring garbage.
+route("POST", /^\/api\/admin\/restore\/encrypted\/?$/, async (req, res) => {
+  const session = requireGlobalAdmin(req, res);
+  if (!session) return;
   let body;
   try {
-    body = await readBody(req, 20 * 1024 * 1024); // backups can be a few MB with enough order history
+    body = await readBody(req, 30 * 1024 * 1024); // backups can run a few MB once uploaded photos are included
   } catch (e) {
     return sendJson(res, 413, { error: "Backup file too large" });
   }
   if (!body.confirmYes) {
     return sendJson(res, 400, { error: "Missing confirmation" });
   }
-  if (!body.files || typeof body.files !== "object") {
+  const passphrase = String(body.passphrase || "");
+  let payload;
+  try {
+    const encrypted = Buffer.from(String(body.dataBase64 || ""), "base64");
+    const plaintext = zlib.gunzipSync(decryptBackup(encrypted, passphrase));
+    payload = JSON.parse(plaintext.toString("utf8"));
+  } catch (e) {
+    return sendJson(res, 400, { error: "Wrong passphrase, or this isn't a valid backup file" });
+  }
+  if (!payload.files || typeof payload.files !== "object") {
     return sendJson(res, 400, { error: "That doesn't look like a backup file" });
   }
+
+  const { restoredCount, uploadsRestored } = applyBackupPayload({ files: payload.files, uploads: payload.uploads });
+  logEvent("warn", "Whole-instance restore applied (encrypted backup)", { restoredCount, uploadsRestored, by: session.name });
+  sendJson(res, 200, { ok: true, restoredCount, uploadsRestored });
+});
+
+/** Shared by the plain-JSON restore route below and the encrypted-backup
+ *  restore route further down (see BACKUP_ENCRYPTION section) - same
+ *  destructive whole-instance restore either way, just a different wrapper
+ *  around getting `{files, uploads}` onto disk. `uploads` (added for the
+ *  encrypted backup, which - unlike the plain JSON export - actually
+ *  captures the real uploaded files, not just uploads.json's metadata
+ *  about them) is a map of filename -> base64 content under UPLOADS_DIR. */
+function applyBackupPayload({ files, uploads }) {
   // A backup taken before someone deleted their account would otherwise
   // resurrect that account's real login credentials the moment it's
   // restored - capture who's currently deleted BEFORE users.json gets
@@ -3776,13 +3871,13 @@ route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
 
   let restoredCount = 0;
   for (const [name, filePath] of Object.entries(BACKUP_FILES)) {
-    if (body.files[name] !== undefined && body.files[name] !== null) {
-      writeJson(filePath, body.files[name]);
+    if (files[name] !== undefined && files[name] !== null) {
+      writeJson(filePath, files[name]);
       restoredCount++;
     }
   }
 
-  if (previouslyDeleted.length && body.files["users.json"] !== undefined) {
+  if (previouslyDeleted.length && files["users.json"] !== undefined) {
     const restoredUsers = readJson(USERS_FILE, []);
     let resealed = false;
     previouslyDeleted.forEach((deletedUser) => {
@@ -3799,7 +3894,7 @@ route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
     });
     if (resealed) writeJson(USERS_FILE, restoredUsers);
 
-    if (body.files["arcade-scores.json"] !== undefined) {
+    if (files["arcade-scores.json"] !== undefined) {
       const restoredScores = readJson(ARCADE_SCORES_FILE, []);
       const deletedIds = new Set(previouslyDeleted.map((u) => u.id));
       let scoresResealed = false;
@@ -3813,6 +3908,47 @@ route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
     }
   }
 
+  let uploadsRestored = 0;
+  if (uploads && typeof uploads === "object") {
+    for (const [filename, base64] of Object.entries(uploads)) {
+      // Filenames in a backup always came from this same server's own
+      // upload route (crypto.randomBytes hex + a fixed extension - see
+      // POST /api/uploads) - never trust that blindly on the way back in
+      // from a file someone could hand-edit, so re-validate the shape
+      // before it touches a real filesystem path.
+      if (!/^[a-f0-9]{16}\.(png|jpg|jpeg|gif|webp)$/i.test(filename)) continue;
+      try {
+        fs.writeFileSync(path.join(UPLOADS_DIR, filename), Buffer.from(base64, "base64"));
+        uploadsRestored++;
+      } catch (e) {
+        // One bad file shouldn't abort restoring everything else.
+      }
+    }
+  }
+
+  return { restoredCount, uploadsRestored };
+}
+
+// Whole-instance restore is the single most destructive route in the app -
+// tightened to Global Admin only (owner keeps read/download above, but
+// never writes here, matching read-only-outside-adding-Global-Admins).
+route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
+  const session = requireGlobalAdmin(req, res);
+  if (!session) return;
+  let body;
+  try {
+    body = await readBody(req, 20 * 1024 * 1024); // backups can be a few MB with enough order history
+  } catch (e) {
+    return sendJson(res, 413, { error: "Backup file too large" });
+  }
+  if (!body.confirmYes) {
+    return sendJson(res, 400, { error: "Missing confirmation" });
+  }
+  if (!body.files || typeof body.files !== "object") {
+    return sendJson(res, 400, { error: "That doesn't look like a backup file" });
+  }
+  const { restoredCount } = applyBackupPayload({ files: body.files, uploads: null });
+  logEvent("warn", "Whole-instance restore applied (plain backup)", { restoredCount, by: session.name });
   sendJson(res, 200, { ok: true, restoredCount });
 });
 

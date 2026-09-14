@@ -1185,6 +1185,36 @@ export const AdminPortal = {
                 }
                 <p id="backup-error" role="alert" aria-live="polite" style="color:var(--color-danger); font-size:11px; min-height:12px; margin-top:10px;"></p>
             </div>
+
+            <div class="config-controls" style="margin-top:20px;">
+                <h3 style="margin-top:0;">ENCRYPTED BACKUP (for off-site storage)</h3>
+                <p class="admin-help-text">Unlike the plain backup above, this includes the actual uploaded photos too - one file with everything needed to rebuild this shop on a brand new computer. Encrypted with a passphrase YOU set. <strong style="color:var(--color-danger);">There is no recovery if you forget it</strong> - that's what makes it real encryption. Store this file somewhere off this machine (Google Drive, a USB drive, email it to yourself).</p>
+                <div class="control-group" style="max-width:320px;">
+                    <label for="ebackup-passphrase">PASSPHRASE (min. 8 characters)</label>
+                    <input type="password" id="ebackup-passphrase" autocomplete="new-password" />
+                </div>
+                <button class="admin-btn-primary" id="ebackup-download" style="margin-top:10px;">DOWNLOAD ENCRYPTED BACKUP</button>
+
+                ${
+                    canRestore
+                        ? `
+                <h3 style="margin-top:25px; border-top:1px solid var(--color-border); padding-top:20px;">RESTORE FROM ENCRYPTED BACKUP</h3>
+                <p class="admin-help-text" style="color:var(--color-danger);">Same as the plain restore above (overwrites everything, can't be undone) - plus it puts back the uploaded photos this backup captured.</p>
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
+                    <label for="erestore-file-input" class="admin-btn-secondary" style="cursor:pointer;">CHOOSE FILE</label>
+                    <input type="file" id="erestore-file-input" accept=".sbcbackup" style="display:none;" />
+                    <span id="erestore-file-name" style="font-size:11px; color:var(--color-text-muted);">No file selected.</span>
+                </div>
+                <div class="control-group" style="max-width:320px;">
+                    <label for="erestore-passphrase">PASSPHRASE</label>
+                    <input type="password" id="erestore-passphrase" autocomplete="off" />
+                </div>
+                <button class="admin-btn-secondary" id="erestore-upload" style="border-color:var(--color-danger); color:var(--color-danger); margin-top:10px;" disabled>RESTORE FROM ENCRYPTED BACKUP</button>
+                `
+                        : ""
+                }
+                <p id="ebackup-error" role="alert" aria-live="polite" style="color:var(--color-danger); font-size:11px; min-height:12px; margin-top:10px;"></p>
+            </div>
         `;
 
         document.getElementById("backup-download").addEventListener("click", () => {
@@ -1194,7 +1224,105 @@ export const AdminPortal = {
             window.open("/api/admin/backup", "_blank");
         });
 
+        // The encrypted backup needs a passphrase in the POST body, so it
+        // can't be a plain navigation like the one above - fetch it as a
+        // blob and trigger the save via a throwaway <a download> instead.
+        document.getElementById("ebackup-download").addEventListener("click", async () => {
+            const errorEl = document.getElementById("ebackup-error");
+            errorEl.textContent = "";
+            const passphrase = document.getElementById("ebackup-passphrase").value;
+            if (passphrase.length < 8) {
+                errorEl.textContent = "Passphrase must be at least 8 characters";
+                return;
+            }
+            const btn = document.getElementById("ebackup-download");
+            btn.disabled = true;
+            btn.textContent = "PREPARING…";
+            try {
+                const res = await fetch("/api/admin/backup/encrypted", {
+                    method: "POST",
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ passphrase })
+                });
+                if (!res.ok) throw new Error((await res.json()).error || "Could not create backup");
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `seven-bits-coffee-backup-${new Date().toISOString().slice(0, 10)}.sbcbackup`;
+                a.click();
+                URL.revokeObjectURL(url);
+                ok("Encrypted backup downloaded - store it somewhere off this machine.");
+            } catch (e) {
+                errorEl.textContent = e.message || "Could not create backup";
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "DOWNLOAD ENCRYPTED BACKUP";
+            }
+        });
+
         if (!canRestore) return;
+
+        let encryptedRestoreFile = null;
+        const erestoreBtn = document.getElementById("erestore-upload");
+        document.getElementById("erestore-file-input").addEventListener("change", (e) => {
+            encryptedRestoreFile = e.target.files[0] || null;
+            erestoreBtn.disabled = !encryptedRestoreFile;
+            document.getElementById("erestore-file-name").textContent = encryptedRestoreFile ? encryptedRestoreFile.name : "No file selected.";
+        });
+
+        erestoreBtn.addEventListener("click", () => {
+            if (!encryptedRestoreFile) return;
+            const passphrase = document.getElementById("erestore-passphrase").value;
+            const errorEl = document.getElementById("ebackup-error");
+            errorEl.textContent = "";
+            if (!passphrase) {
+                errorEl.textContent = "Enter the passphrase this backup was created with";
+                return;
+            }
+            renderInfoModal({
+                title: "RESTORE FROM ENCRYPTED BACKUP",
+                message: `This will overwrite current menu, orders, staff accounts, settings, and uploaded photos with the contents of "${escapeHtmlAttr(encryptedRestoreFile.name)}". This can't be undone. Continue?`,
+                confirmText: "RESTORE",
+                cancelText: "CANCEL",
+                onConfirm: async () => {
+                    try {
+                        // FileReader's own base64 encoder (same as
+                        // uploads-logic.js's image upload) rather than
+                        // btoa(String.fromCharCode(...bytes)) - spreading a
+                        // multi-MB Uint8Array into function arguments like
+                        // that risks a call-stack overflow that a several-
+                        // hundred-KB image upload never hit but a backup
+                        // file easily could.
+                        const dataUrl = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.onerror = () => reject(new Error("Could not read that file"));
+                            reader.readAsDataURL(encryptedRestoreFile);
+                        });
+                        // [^;]* (not +) - a custom .sbcbackup extension has
+                        // no registered MIME type, so browsers commonly
+                        // produce "data:;base64,..." with nothing between
+                        // the colon and semicolon, unlike a real image
+                        // upload's always-populated image/* type.
+                        const dataBase64 = dataUrl.replace(/^data:[^;]*;base64,/, "");
+                        const res = await fetch("/api/admin/restore/encrypted", {
+                            method: "POST",
+                            credentials: "include",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ confirmYes: true, passphrase, dataBase64 })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || "Restore failed");
+                        ok(`Restored ${data.restoredCount} file(s) and ${data.uploadsRestored} photo(s) - reloading…`);
+                        setTimeout(() => window.location.reload(), 1200);
+                    } catch (e) {
+                        errorEl.textContent = e.message || "Could not restore backup";
+                    }
+                }
+            });
+        });
 
         let restoreFile = null;
         const restoreBtn = document.getElementById("restore-upload");
