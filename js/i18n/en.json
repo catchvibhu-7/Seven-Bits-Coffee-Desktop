@@ -8,7 +8,9 @@
         "backToLogin": "BACK TO LOGIN",
         "switchLanguage": "Switch language",
         "genericError": "Something went wrong. Please try again.",
-        "loading": "Loading..."
+        "loading": "Loading...",
+        "copy": "Copy",
+        "copied": "Copied!"
     },
     "nav": {
         "home": "Home",
@@ -65,6 +67,7 @@
         "notifyEnabled": "✓ WE'LL LET YOU KNOW",
         "thankYou": "Thank you for visiting! Have a great day.",
         "scanToTrack": "Scan to track this order from any device - no login needed.",
+        "qrTroubleHint": "Scan not opening? Tap the link above to open it in your browser instead.",
         "pay": "PAY",
         "payAtCounterInstead": "PAY AT COUNTER INSTEAD",
         "approxWaitTime": "APPROX. WAIT TIME: ~{{mins}} {{unit}}",

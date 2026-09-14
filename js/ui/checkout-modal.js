@@ -504,45 +504,87 @@ function round2(n) {
     return Math.round(n * 100) / 100;
 }
 
-/** Builds the actual QR <img> src for a given base origin - shared by the
- *  initial synchronous render and upgradeTrackingQrForLan()'s later swap
- *  (see below), so the two can never drift into building the URL two
- *  different ways. */
-function trackingQrSrc(origin, trackingToken) {
-    const trackUrl = `${origin}${location.pathname}?track=${trackingToken}`;
-    return `https://api.qrserver.com/v1/create-qr-code/?size=110x110&data=${encodeURIComponent(trackUrl)}`;
+/** Plain tracking URL for a given base origin - shared by the QR (below)
+ *  and the visible fallback link, so the two can never drift into building
+ *  it two different ways. */
+function trackingUrl(origin, trackingToken) {
+    return `${origin}${location.pathname}?track=${trackingToken}`;
 }
 
-/** QR for the no-login order-tracking page (js/ui/track-page.js) - built
- *  client-side (same free QR API the UPI QR already uses) so the server
- *  never has to guess its own public origin/protocol.
+function trackingQrSrc(origin, trackingToken) {
+    return `https://api.qrserver.com/v1/create-qr-code/?size=110x110&data=${encodeURIComponent(trackingUrl(origin, trackingToken))}`;
+}
+
+/** QR (plus a visible fallback link) for the no-login order-tracking page
+ *  (js/ui/track-page.js) - the QR image itself is built client-side (same
+ *  free QR API the UPI QR already uses) so the server never has to guess
+ *  its own public origin/protocol.
  *
  *  Starts from location.origin, which is already correct for a normal web/
  *  server deployment - but the desktop app's BrowserWindow always loads
  *  http://localhost:<port>, and a phone scanning that QR would try to open
  *  "localhost" on ITSELF, not the till this order was placed on. See
  *  upgradeTrackingQrForLan() below, called right after this renders, which
- *  swaps in the till's real LAN address for exactly that case. */
+ *  swaps in the till's real LAN address for exactly that case.
+ *
+ *  The visible link + copy button underneath is a deliberate fallback for
+ *  a real, unfixable-from-here failure mode: some phones' Camera apps open
+ *  a scanned link in a restrictive inline preview that hard-refuses plain
+ *  http:// navigation under "HTTPS-Only" enforcement, with no bypass at
+ *  all - unlike a full browser's address bar, which for the same link
+ *  typically only shows a dismissible warning. There's no code-only fix
+ *  for that preview's own restriction while staying on http - the best
+ *  available mitigation is giving the customer an easy way out of the
+ *  restrictive preview and into their real browser instead. */
 function trackingQrHtml(trackingToken) {
+    const url = trackingUrl(location.origin, trackingToken);
     const qrSrc = trackingQrSrc(location.origin, trackingToken);
     return `
-        <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin:16px 0; padding-top:16px; border-top:1px dashed var(--color-border);" id="tracking-qr-row">
-            <div style="background:white; padding:6px; border:2px solid var(--color-accent);"><img id="tracking-qr-img" src="${qrSrc}" alt="Track order QR" width="90" height="90"></div>
-            <p style="font-family: 'Courier New', monospace; color: var(--color-text-muted); font-size: 11px; text-align:left; margin:0; max-width:150px;">${t("checkout.scanToTrack")}</p>
+        <div style="margin:16px 0; padding-top:16px; border-top:1px dashed var(--color-border);" id="tracking-qr-row">
+            <div style="display:flex; align-items:center; justify-content:center; gap:12px;">
+                <div style="background:white; padding:6px; border:2px solid var(--color-accent);"><img id="tracking-qr-img" src="${qrSrc}" alt="Track order QR" width="90" height="90"></div>
+                <p style="font-family: 'Courier New', monospace; color: var(--color-text-muted); font-size: 11px; text-align:left; margin:0; max-width:150px;">${t("checkout.scanToTrack")}</p>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+                <a id="tracking-url-link" href="${url}" target="_blank" rel="noopener" style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; color:var(--color-text-muted); text-decoration:underline;">${url}</a>
+                <button type="button" id="tracking-url-copy" style="flex:none; padding:5px 8px; background:transparent; border:1px solid var(--color-accent); color:var(--color-accent); font-size:9px; font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">${t("common.copy")}</button>
+            </div>
+            <p style="font-family: 'Courier New', monospace; color: var(--color-text-muted); font-size: 9px; margin:6px 0 0;">${t("checkout.qrTroubleHint")}</p>
         </div>
     `;
 }
 
-/** Swaps the tracking QR to use this machine's real LAN address instead of
- *  "localhost" - only does anything when location.hostname is actually a
- *  loopback address (the desktop app's case); a no-op for a normal web/
- *  server deployment where location.origin was already a real reachable
- *  address for anyone else on the network. Filled in after the fact
- *  (called right after the confirmation modal's own appendChild), same
- *  "don't block the confirmation screen on a network round-trip" pattern
- *  the wait-time line below already uses. GET /api/network-info is open to
- *  any authenticated session (not just staff) specifically so a customer's
- *  own self-checkout confirmation can call it too. */
+/** Copy-to-clipboard for the fallback link above - same "best-effort, fail
+ *  quiet" handling the staff home page's Network Address card already
+ *  uses, since clipboard access can be denied/unavailable in some contexts
+ *  and the link is already right there to read/tap either way. */
+function wireTrackingUrlCopyButton() {
+    const btn = document.getElementById("tracking-url-copy");
+    const link = document.getElementById("tracking-url-link");
+    if (!btn || !link) return;
+    btn.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(link.href);
+            const original = btn.textContent;
+            btn.textContent = t("common.copied");
+            setTimeout(() => (btn.textContent = original), 1500);
+        } catch (e) {
+            // Link is already visible/tappable - clipboard is a bonus, not required.
+        }
+    });
+}
+
+/** Swaps the tracking QR (and the fallback link/copy button above) to use
+ *  this machine's real LAN address instead of "localhost" - only does
+ *  anything when location.hostname is actually a loopback address (the
+ *  desktop app's case); a no-op for a normal web/server deployment where
+ *  location.origin was already a real reachable address for anyone else on
+ *  the network. Filled in after the fact (called right after the
+ *  confirmation modal's own appendChild), same "don't block the
+ *  confirmation screen on a network round-trip" pattern the wait-time line
+ *  below already uses. GET /api/network-info is open to any authenticated
+ *  session (not just staff) specifically so a customer's own self-checkout
+ *  confirmation can call it too. */
 async function upgradeTrackingQrForLan(trackingToken) {
     if (!["localhost", "127.0.0.1", "[::1]", "::1"].includes(location.hostname)) return;
     try {
@@ -553,9 +595,15 @@ async function upgradeTrackingQrForLan(trackingToken) {
         if (!lanUrl) return;
         const img = document.getElementById("tracking-qr-img");
         if (img) img.src = trackingQrSrc(lanUrl, trackingToken);
+        const link = document.getElementById("tracking-url-link");
+        if (link) {
+            const url = trackingUrl(lanUrl, trackingToken);
+            link.href = url;
+            link.textContent = url;
+        }
     } catch (e) {
-        // Confirmation screen already shows a (locally-correct) QR - worth
-        // trying to upgrade it, not worth surfacing an error over.
+        // Confirmation screen already shows a (locally-correct) QR/link -
+        // worth trying to upgrade it, not worth surfacing an error over.
     }
 }
 
@@ -705,7 +753,10 @@ export function renderPaymentConfirmation(order, method, { isCustomerFacing = fa
             </div>
         `;
         document.body.appendChild(overlay);
-        if (order.trackingToken) upgradeTrackingQrForLan(order.trackingToken);
+        if (order.trackingToken) {
+            wireTrackingUrlCopyButton();
+            upgradeTrackingQrForLan(order.trackingToken);
+        }
         // Filled in after the fact rather than blocking the confirmation
         // screen on a network round-trip - the order's own lines are already
         // part of the backlog this reads (it was just saved server-side), so
