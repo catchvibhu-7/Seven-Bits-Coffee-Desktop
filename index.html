@@ -120,6 +120,10 @@
                                  just bounces to a "place an order to unlock" message. -->
                             <button id="home-hero-arcade-btn" class="home-hero-secondary" style="display:none;">Arcade</button>
                         </div>
+                        <!-- 7-day stamp card - populated/shown only when the shop has
+                             turned it on and the current session has a phone number to
+                             track it by. See renderHomeStampCard() in app.js. -->
+                        <div id="home-stamp-card" style="display:none;"></div>
                     </div>
                     <!-- Up to 5 admin-set photos cycle here (see renderHeroCarousel()
                          in app.js) - two stacked bg layers crossfade between them,
@@ -154,11 +158,6 @@
             </div>
 
             <div id="home-store-facts" class="home-store-facts"></div>
-
-            <!-- 7-day stamp card - populated/shown only when the shop has
-                 turned it on and the current session has a phone number to
-                 track it by. See renderHomeStampCard() in app.js. -->
-            <div id="home-stamp-card" style="display:none;"></div>
 
             <div class="home-body">
                 <div class="home-section-header">

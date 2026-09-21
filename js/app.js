@@ -2880,9 +2880,15 @@ async function renderHomeStampCard() {
     root.style.display = "block";
     root.className = "home-stamp-card";
 
+    // Reuses the menu's own icon set (icon icon-espresso / icon icon-gift,
+    // see css/iconsvg.css) rather than emoji, so this reads as part of the
+    // same visual system as everywhere else an item icon shows up.
     const stamps = data.stamps || 0;
-    const dots = Array.from({ length: 7 }, (_, i) => `<span class="stamp-dot${i < stamps ? " stamp-dot-filled" : ""}">☕</span>`).join("");
-    const rewardDot = `<span class="stamp-dot stamp-dot-reward${data.rewardReady ? " stamp-dot-ready" : ""}">🎁</span>`;
+    const dots = Array.from(
+        { length: 7 },
+        (_, i) => `<span class="stamp-dot${i < stamps ? " stamp-dot-filled" : ""}"><span class="icon icon-espresso"></span></span>`
+    ).join("");
+    const rewardDot = `<span class="stamp-dot stamp-dot-reward${data.rewardReady ? " stamp-dot-ready" : ""}"><span class="icon icon-gift"></span></span>`;
     root.innerHTML = `
         <div class="stamp-card-title">${t("home.stampCardTitle")}</div>
         <div class="stamp-card-row">${dots}${rewardDot}</div>
