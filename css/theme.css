@@ -2644,10 +2644,12 @@ input[type="checkbox"]:disabled {
    on and the visitor is signed in (customer or guest). */
 .home-stamp-card {
     margin-top: 24px;
-    padding: 16px 18px;
-    max-width: 440px;
+    padding: 14px 16px;
+    width: fit-content;
+    max-width: 100%;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
+    cursor: help; /* hints there's a tooltip (see the .title attribute set in renderHomeStampCard()) */
 }
 .stamp-card-title {
     font-size: 11px;
@@ -2655,15 +2657,16 @@ input[type="checkbox"]:disabled {
     text-transform: uppercase;
     color: var(--color-text-muted);
     margin-bottom: 12px;
+    white-space: nowrap;
 }
 .stamp-card-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
 }
 .stamp-dot {
-    width: 36px;
-    height: 36px;
+    width: 32px;
+    height: 32px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2674,8 +2677,8 @@ input[type="checkbox"]:disabled {
     transition: border-color 0.3s, box-shadow 0.3s;
 }
 .stamp-dot .icon {
-    width: 19px;
-    height: 19px;
+    width: 17px;
+    height: 17px;
     opacity: 0.35;
     transition: opacity 0.3s;
 }
@@ -2703,16 +2706,6 @@ input[type="checkbox"]:disabled {
     50% {
         box-shadow: 0 0 16px 4px var(--color-accent);
     }
-}
-.stamp-card-note {
-    margin: 12px 0 0;
-    font-size: 11px;
-    color: var(--color-text-muted);
-    letter-spacing: 0.03em;
-}
-.stamp-card-note-ready {
-    color: var(--color-accent);
-    font-weight: bold;
 }
 @media (prefers-reduced-motion: reduce) {
     .stamp-dot-ready {

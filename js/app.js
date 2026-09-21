@@ -2889,10 +2889,13 @@ async function renderHomeStampCard() {
         (_, i) => `<span class="stamp-dot${i < stamps ? " stamp-dot-filled" : ""}"><span class="icon icon-espresso"></span></span>`
     ).join("");
     const rewardDot = `<span class="stamp-dot stamp-dot-reward${data.rewardReady ? " stamp-dot-ready" : ""}"><span class="icon icon-gift"></span></span>`;
+    // The "X of 7" progress line moved from always-visible text to a native
+    // hover tooltip (title attribute) - dropping it from the box's own flow
+    // is most of what keeps this compact instead of forcing extra width.
+    root.title = data.rewardReady ? t("home.stampCardReady") : t("home.stampCardProgress", { count: stamps });
     root.innerHTML = `
         <div class="stamp-card-title">${t("home.stampCardTitle")}</div>
         <div class="stamp-card-row">${dots}${rewardDot}</div>
-        <p class="stamp-card-note${data.rewardReady ? " stamp-card-note-ready" : ""}">${data.rewardReady ? t("home.stampCardReady") : t("home.stampCardProgress", { count: stamps })}</p>
     `;
 }
 
