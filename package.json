@@ -28,6 +28,7 @@
     "files": [
       "main.js",
       "server.js",
+      "db.js",
       "index.html",
       "css/**/*",
       "js/**/*",
@@ -40,6 +41,7 @@
     "directories": {
       "output": "dist"
     },
+    "asarUnpack": ["node_modules/better-sqlite3/**/*"],
     "win": {
       "target": "nsis"
     },
@@ -57,5 +59,8 @@
       "target": "AppImage",
       "category": "Office"
     }
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
   }
 }

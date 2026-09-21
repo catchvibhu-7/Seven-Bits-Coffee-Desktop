@@ -134,22 +134,55 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // ---------------------------------------------------------------------------
-// Tiny JSON file "database" helpers
+// SQLite-backed "database" helpers (see db.js) - readJson/writeJson keep
+// their original names and exact read-whole-collection/write-whole-
+// collection contract on purpose, so the ~310 existing call sites below
+// needed zero changes; only what these two functions actually DO changed,
+// from fs.readFileSync/writeFileSync to SQLite. readJsonFile/writeJsonFile
+// are the ORIGINAL fs-based implementation, kept under new names for the
+// handful of call sites that intentionally stay outside this migration
+// (bundled data-seed/ templates, ARCHIVES_DIR yearly order archives).
 // ---------------------------------------------------------------------------
 
-function readJson(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch (e) {
-    return fallback;
-  }
-}
+const { initDb, readJson, writeJson, jsonExists, readJsonFile, writeJsonFile } = require("./db.js");
 
-function writeJson(file, data) {
-  // Write to a temp file then rename, so a crash mid-write can't corrupt the file.
-  const tmp = file + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, file);
+// Migrates any pre-existing data/*.json files into data/app.db the first
+// time this runs against a given data dir (no-op on every later boot, and
+// no-op for a brand new install with no old files to import) - see
+// db.js's initDb() for the "only on a freshly-created app.db" guard. Listed
+// as plain filenames rather than the `*_FILE` constants below since a few
+// of those (CUSTOMIZATION_FILE) aren't declared until later in this file
+// and migration needs the full list up front, before anything else here
+// reads or writes a single record.
+{
+  const migrated = initDb(
+    DATA_DIR,
+    [
+      "menu.json",
+      "config.json",
+      "orders.json",
+      "users.json",
+      "audit-log.json",
+      "branding-profiles.json",
+      "stores.json",
+      "timeclock.json",
+      "payroll.json",
+      "attendance.json",
+      "overtime-approvals.json",
+      "favorites.json",
+      "addresses.json",
+      "raw-materials.json",
+      "combos.json",
+      "table-sessions.json",
+      "coupons.json",
+      "arcade-scores.json",
+      "stamp-cards.json",
+      "user-preferences.json",
+      "uploads.json",
+      "customization-options.json"
+    ].map((name) => path.join(DATA_DIR, name))
+  ).migratedCount;
+  if (migrated > 0) logEvent("info", "Migrated JSON data files into SQLite", { fileCount: migrated });
 }
 
 const MENU_FILE = path.join(DATA_DIR, "menu.json");
@@ -185,18 +218,18 @@ const USER_PREFERENCES_FILE = path.join(DATA_DIR, "user-preferences.json");
 // name, size, who/when) and to resolve an id back to a filename on delete.
 const UPLOADS_MANIFEST_FILE = path.join(DATA_DIR, "uploads.json");
 
-if (!fs.existsSync(AUDIT_LOG_FILE)) writeJson(AUDIT_LOG_FILE, []);
-if (!fs.existsSync(BRANDING_PROFILES_FILE)) writeJson(BRANDING_PROFILES_FILE, {});
-if (!fs.existsSync(TIMECLOCK_FILE)) writeJson(TIMECLOCK_FILE, []);
-if (!fs.existsSync(PAYROLL_FILE)) writeJson(PAYROLL_FILE, []);
-if (!fs.existsSync(ATTENDANCE_FILE)) writeJson(ATTENDANCE_FILE, []);
-if (!fs.existsSync(OVERTIME_APPROVALS_FILE)) writeJson(OVERTIME_APPROVALS_FILE, []);
+if (!jsonExists(AUDIT_LOG_FILE)) writeJson(AUDIT_LOG_FILE, []);
+if (!jsonExists(BRANDING_PROFILES_FILE)) writeJson(BRANDING_PROFILES_FILE, {});
+if (!jsonExists(TIMECLOCK_FILE)) writeJson(TIMECLOCK_FILE, []);
+if (!jsonExists(PAYROLL_FILE)) writeJson(PAYROLL_FILE, []);
+if (!jsonExists(ATTENDANCE_FILE)) writeJson(ATTENDANCE_FILE, []);
+if (!jsonExists(OVERTIME_APPROVALS_FILE)) writeJson(OVERTIME_APPROVALS_FILE, []);
 // Multi-store groundwork: everything (users, and later menu/orders) can carry
 // a storeId, but with a single store seeded there's no behavior change yet -
 // this just means a real second store later doesn't need a data migration.
-if (!fs.existsSync(STORES_FILE)) writeJson(STORES_FILE, [{ id: 1, name: "Main Store", address: "" }]);
-if (!fs.existsSync(UPLOADS_MANIFEST_FILE)) writeJson(UPLOADS_MANIFEST_FILE, []);
-if (!fs.existsSync(USER_PREFERENCES_FILE)) writeJson(USER_PREFERENCES_FILE, {});
+if (!jsonExists(STORES_FILE)) writeJson(STORES_FILE, [{ id: 1, name: "Main Store", address: "" }]);
+if (!jsonExists(UPLOADS_MANIFEST_FILE)) writeJson(UPLOADS_MANIFEST_FILE, []);
+if (!jsonExists(USER_PREFERENCES_FILE)) writeJson(USER_PREFERENCES_FILE, {});
 
 /**
  * Records sensitive admin actions (currently: password resets and staff
@@ -224,8 +257,8 @@ function logAuditEvent(actorSession, action, targetUser, meta = null) {
   writeJson(AUDIT_LOG_FILE, log.slice(-1000));
 }
 
-if (!fs.existsSync(MENU_FILE)) {
-  const seed = readJson(path.join(SEED_DIR, "menu-seed.json"), { sections: [], items: [], inventory: {} });
+if (!jsonExists(MENU_FILE)) {
+  const seed = readJsonFile(path.join(SEED_DIR, "menu-seed.json"), { sections: [], items: [], inventory: {} });
   writeJson(MENU_FILE, seed);
 }
 
@@ -244,7 +277,7 @@ Your order history is kept for our own records and reporting. You can ask us to 
 
 If you have questions about your data, contact us using the details in the footer below.`;
 
-if (!fs.existsSync(CONFIG_FILE)) {
+if (!jsonExists(CONFIG_FILE)) {
   writeJson(CONFIG_FILE, {
     shopName: "SEVEN BITS COFFEE",
     // Multi-currency - currencySymbol is what every price display in the
@@ -364,7 +397,7 @@ if (!fs.existsSync(CONFIG_FILE)) {
 // One-time boot migration: back-fill storeId:null (franchise-wide) onto any
 // coupon created before coupons gained per-store scoping, without touching
 // coupons.json at all if it doesn't exist yet or nothing needs changing.
-if (fs.existsSync(COUPONS_FILE)) {
+if (jsonExists(COUPONS_FILE)) {
   const coupons = readJson(COUPONS_FILE, []);
   let changed = false;
   for (const c of coupons) {
@@ -464,7 +497,7 @@ const DEFAULT_BRANDING = {
   }
 };
 
-if (!fs.existsSync(ORDERS_FILE)) {
+if (!jsonExists(ORDERS_FILE)) {
   writeJson(ORDERS_FILE, []);
 }
 
@@ -503,7 +536,7 @@ function passwordIssues(password) {
 }
 
 function bootstrapOwnerAccount() {
-  if (fs.existsSync(USERS_FILE)) return;
+  if (jsonExists(USERS_FILE)) return;
 
   const username = process.env.OWNER_USERNAME || "owner";
   // Falls back to the old ADMIN_PASSWORD env var so anyone upgrading from the
@@ -4085,7 +4118,7 @@ function buildBackupPayload({ includeArchives = false } = {}) {
   if (includeArchives) {
     const archives = {};
     for (const filename of fs.readdirSync(ARCHIVES_DIR)) {
-      archives[filename] = readJson(path.join(ARCHIVES_DIR, filename), []);
+      archives[filename] = readJsonFile(path.join(ARCHIVES_DIR, filename), []);
     }
     payload.archives = archives;
   }
@@ -4252,7 +4285,7 @@ function applyBackupPayload({ files, uploads, archives }) {
       // the uploads filenames above.
       if (!/^orders-\d{4}\.json$/.test(filename) || !Array.isArray(records)) continue;
       try {
-        writeJson(path.join(ARCHIVES_DIR, filename), records);
+        writeJsonFile(path.join(ARCHIVES_DIR, filename), records);
         archivesRestored++;
       } catch (e) {
         // One bad archive file shouldn't abort restoring everything else.
@@ -4313,7 +4346,7 @@ route("POST", /^\/api\/admin\/restore\/demo\/?$/, async (req, res) => {
     return sendJson(res, 400, { error: "Missing confirmation" });
   }
   const demoPath = path.join(SEED_DIR, "demo-backup.json");
-  const payload = readJson(demoPath, null);
+  const payload = readJsonFile(demoPath, null);
   if (!payload || !payload.files) {
     return sendJson(res, 404, { error: "No demo data bundled with this build" });
   }
@@ -4496,8 +4529,8 @@ function compactOldOrders() {
 
   for (const [year, yearOrders] of Object.entries(byYear)) {
     const archiveFile = path.join(ARCHIVES_DIR, `orders-${year}.json`);
-    const existing = readJson(archiveFile, []);
-    writeJson(archiveFile, existing.concat(yearOrders));
+    const existing = readJsonFile(archiveFile, []);
+    writeJsonFile(archiveFile, existing.concat(yearOrders));
   }
   writeJson(ORDERS_FILE, nextOrders);
   logEvent("info", "Compacted old orders into yearly archives", {
@@ -4539,7 +4572,7 @@ function findFullOrder(id) {
   if (!order) return null;
   if (!order.archived) return order;
   const year = new Date(order.createdAt).getFullYear();
-  const archived = readJson(path.join(ARCHIVES_DIR, `orders-${year}.json`), []);
+  const archived = readJsonFile(path.join(ARCHIVES_DIR, `orders-${year}.json`), []);
   return archived.find((o) => o.id === id) || order;
 }
 
