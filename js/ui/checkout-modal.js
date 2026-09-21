@@ -105,6 +105,18 @@ export async function renderCheckoutModal(cartItems, serviceChargeActive, tipApp
     const openTables = isStaff ? await TableSessionsSystem.list("open") : [];
     const loyalty = config.loyalty || { enabled: false, pointsPerRupeeSpent: 0, rupeeValuePerPoint: 0 };
     const canUseLoyalty = session.role === "customer" && loyalty.enabled && (session.loyaltyPoints || 0) > 0;
+    // Stamp card is phone-tracked, not account-tracked, so a guest checkout
+    // counts too (unlike the points program above, customer-only) - only
+    // excluded for staff, whose own session.phone isn't the customer's.
+    let stampCardStatus = { enabled: false, rewardReady: false };
+    if (!isStaff) {
+        try {
+            const res = await fetch("/api/stamp-card", { credentials: "include" });
+            if (res.ok) stampCardStatus = await res.json();
+        } catch (e) {
+            // Not being able to check isn't worth blocking checkout over.
+        }
+    }
 
     let finalTotal = breakdown.total;
     if (!serviceChargeActive) finalTotal -= breakdown.serviceCharge;
@@ -113,7 +125,7 @@ export async function renderCheckoutModal(cartItems, serviceChargeActive, tipApp
     // Discount state lives on the window for this checkout session (the modal
     // re-renders in full on every cart change, so a closure variable would
     // reset itself) - startCheckout() reads it when placing the order.
-    window.__checkoutDiscount = { couponCode: null, couponAmount: 0, redeemPoints: 0, redeemAmount: 0 };
+    window.__checkoutDiscount = { couponCode: null, couponAmount: 0, redeemPoints: 0, redeemAmount: 0, redeemStampReward: false, stampRewardAmount: 0 };
 
     const modalHtml = `
     <div id="modal-overlay" class="modal-overlay">
@@ -208,6 +220,17 @@ export async function renderCheckoutModal(cartItems, serviceChargeActive, tipApp
                     <button id="checkout-apply-points" class="admin-btn" style="padding:11px 14px;">${t("checkout.redeem")}</button>
                 </div>
             </div>`
+                    : ""
+            }
+
+            ${
+                stampCardStatus.enabled && stampCardStatus.rewardReady
+                    ? `
+            <label style="display:flex; align-items:center; gap:8px; font-size: 12px; color: var(--color-accent); border: 1px dashed var(--color-accent); padding: 10px; margin-bottom: 15px; cursor:pointer;">
+                <input type="checkbox" id="checkout-redeem-stamp" />
+                ${t("home.stampCardReady")}
+            </label>
+            <p id="checkout-stamp-msg" style="font-size: 10px; margin: -10px 0 12px; min-height: 10px; color: var(--color-danger);"></p>`
                     : ""
             }
 
@@ -400,7 +423,7 @@ export async function renderCheckoutModal(cartItems, serviceChargeActive, tipApp
 
     function recomputeCheckoutTotal() {
         const state = window.__checkoutDiscount;
-        const totalDiscount = round2(state.couponAmount + state.redeemAmount);
+        const totalDiscount = round2(state.couponAmount + state.redeemAmount + state.stampRewardAmount);
         const taxableSubtotal = Math.max(0, breakdown.subtotal - totalDiscount);
         const cgst = taxableSubtotal * config.cgstRate;
         const sgst = taxableSubtotal * config.sgstRate;
@@ -418,6 +441,7 @@ export async function renderCheckoutModal(cartItems, serviceChargeActive, tipApp
             const parts = [];
             if (state.couponCode) parts.push(state.couponCode);
             if (state.redeemPoints > 0) parts.push(`${state.redeemPoints} pts`);
+            if (state.stampRewardAmount > 0) parts.push(t("home.stampCardTitle"));
             discountLine.innerHTML = `<span>${t("checkout.discount", { parts: parts.map(escapeHtml).join(" + ") })}</span><span>-${currencySymbol()}${totalDiscount.toFixed(2)}</span>`;
             finalLine.style.display = "flex";
             document.getElementById("checkout-final-total-value").textContent = `${currencySymbol()}${discountedTotal.toFixed(2)}`;
@@ -496,6 +520,41 @@ export async function renderCheckoutModal(cartItems, serviceChargeActive, tipApp
         }
         window.__checkoutDiscount.redeemPoints = points;
         window.__checkoutDiscount.redeemAmount = amount;
+        recomputeCheckoutTotal();
+    });
+
+    document.getElementById("checkout-redeem-stamp")?.addEventListener("change", async (e) => {
+        const msgEl = document.getElementById("checkout-stamp-msg");
+        msgEl.textContent = "";
+        if (!e.target.checked) {
+            window.__checkoutDiscount.redeemStampReward = false;
+            window.__checkoutDiscount.stampRewardAmount = 0;
+            recomputeCheckoutTotal();
+            return;
+        }
+        try {
+            const res = await fetch("/api/stamp-card/preview", {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    items: cartItems.map((i) =>
+                        i.isCombo
+                            ? { type: "combo", comboId: i.comboId, quantity: i.quantity }
+                            : { id: i.id, quantity: i.quantity, customization: { size: i.size, milk: i.milk, extras: (i.extras || []).map((x) => x.key), notes: i.notes } }
+                    )
+                })
+            });
+            const data = await res.json();
+            if (!data.eligible) throw new Error(data.error || t("checkout.invalidCode"));
+            window.__checkoutDiscount.redeemStampReward = true;
+            window.__checkoutDiscount.stampRewardAmount = data.discountAmount;
+        } catch (err) {
+            e.target.checked = false;
+            window.__checkoutDiscount.redeemStampReward = false;
+            window.__checkoutDiscount.stampRewardAmount = 0;
+            msgEl.textContent = err.message;
+        }
         recomputeCheckoutTotal();
     });
 }

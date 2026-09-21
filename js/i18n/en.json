@@ -182,7 +182,10 @@
         "storeDetailsComingSoon": "Store details coming soon.",
         "cartBitsLabel": "BITS IN CART:",
         "favoritesOnly": "FAVORITES ONLY",
-        "jumpToCategory": "Jump to category"
+        "jumpToCategory": "Jump to category",
+        "stampCardTitle": "STAMP CARD",
+        "stampCardProgress": "{{count}} of 7 stamps - order today to fill the next one",
+        "stampCardReady": "Free beverage unlocked! Redeem it at checkout."
     },
     "menu": {
         "pageTitlePart1": "MENU",

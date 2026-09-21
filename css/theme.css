@@ -2636,6 +2636,79 @@ input[type="checkbox"]:disabled {
         white-space: normal;
     }
 }
+/* 7-day stamp card (see renderHomeStampCard() in app.js) - a row of 7
+   "stamp" slots plus an 8th reward slot, filled left-to-right as a phone
+   number orders on distinct calendar days. Hidden entirely unless the shop
+   has turned this on and the visitor is signed in (customer or guest). */
+.home-stamp-card {
+    margin: 20px -20px 0;
+    padding: 18px 20px;
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--color-border);
+}
+.stamp-card-title {
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin-bottom: 12px;
+}
+.stamp-card-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.stamp-dot {
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    border: 1px dashed var(--color-border);
+    background: var(--color-bg);
+    font-size: 16px;
+    opacity: 0.5;
+    transition: opacity 0.3s, border-color 0.3s, background 0.3s;
+}
+.stamp-dot-filled {
+    opacity: 1;
+    border: 1px solid var(--color-accent);
+    background: var(--color-accent);
+}
+.stamp-dot-reward {
+    border-style: solid;
+}
+.stamp-dot-ready {
+    opacity: 1;
+    border-color: var(--color-accent);
+    animation: stamp-card-glow 1.6s ease-in-out infinite;
+}
+@keyframes stamp-card-glow {
+    0%, 100% {
+        box-shadow: 0 0 0 0 var(--color-accent);
+    }
+    50% {
+        box-shadow: 0 0 16px 4px var(--color-accent);
+    }
+}
+.stamp-card-note {
+    margin: 12px 0 0;
+    font-size: 11px;
+    color: var(--color-text-muted);
+    letter-spacing: 0.03em;
+}
+.stamp-card-note-ready {
+    color: var(--color-accent);
+    font-weight: bold;
+}
+@media (prefers-reduced-motion: reduce) {
+    .stamp-dot-ready {
+        animation: none;
+    }
+}
+
 .home-fact {
     padding: 18px 22px;
     border-right: 1px dashed var(--color-border);

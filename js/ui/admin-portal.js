@@ -2644,6 +2644,7 @@ export const AdminPortal = {
     async renderDiscountsLoyalty(root) {
         const config = AdminConfig.settings;
         const loyalty = config.loyalty || { enabled: true, pointsPerRupeeSpent: 0.1, rupeeValuePerPoint: 0.5 };
+        const stampCard = config.stampCard || { enabled: false };
         const couponsRes = await fetch("/api/coupons", { credentials: "include" });
         const coupons = couponsRes.ok ? await couponsRes.json() : [];
         const franchiseCoupons = coupons.filter((c) => c.storeId == null);
@@ -2679,6 +2680,7 @@ export const AdminPortal = {
 
         root.innerHTML = `
             <div id="loyalty-section" style="margin-bottom:30px;"></div>
+            <div id="stampcard-section" style="margin-bottom:30px;"></div>
 
             <h3 style="font-size:14px; letter-spacing:1px; color:var(--color-accent); margin-bottom:10px; border-top:1px solid var(--color-border); padding-top:20px;">FRANCHISE-WIDE COUPONS</h3>
             ${
@@ -2805,6 +2807,23 @@ export const AdminPortal = {
                         }
                         await AdminConfig.saveSettings({ loyalty: { enabled: v["loyalty-enabled"], pointsPerRupeeSpent: earnRate, rupeeValuePerPoint: redeemRate } });
                         ok("Loyalty settings saved");
+                        this.renderDiscountsLoyalty(root);
+                    }
+                })
+        });
+
+        renderReadOnlySection(document.getElementById("stampcard-section"), {
+            title: "7-DAY STAMP CARD",
+            canEdit: canEditLoyalty,
+            fields: [{ label: "Enabled", value: stampCard.enabled ? "Yes" : "No" }],
+            emptyNote: "One stamp per day a customer orders (tracked by phone number, so guest checkouts count too) - completing all 7 unlocks one free beverage on their next order, shown on the Home page. Redeeming it empties the card so the next visit starts a new one.",
+            onEdit: () =>
+                renderSectionEditModal({
+                    title: "EDIT STAMP CARD",
+                    fields: [{ id: "stampcard-enabled", label: "Enable 7-day stamp card", value: stampCard.enabled, type: "checkbox" }],
+                    onSave: async (v) => {
+                        await AdminConfig.saveSettings({ stampCard: { enabled: v["stampcard-enabled"] } });
+                        ok("Stamp card settings saved");
                         this.renderDiscountsLoyalty(root);
                     }
                 })

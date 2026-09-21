@@ -636,6 +636,7 @@ window.showPage = async (pageId) => {
         renderHomeRoastSteps();
         renderHomeVisitRows();
         renderHomeDeliveryTicker();
+        renderHomeStampCard();
         await refreshOrderStatusWidget();
         refreshHomeArcadeButton();
         if (TRACKING_ROLES.includes(session.role)) ensureOrdersStream();
@@ -707,6 +708,7 @@ window.setLanguage = async (lang) => {
         renderHomeStoreFacts();
         renderHomeVisitRows();
         renderHomeDeliveryTicker();
+        renderHomeStampCard();
         // Re-runs the carousel purely to refresh its "The counter" fallback
         // caption in the new language - a no-op visually otherwise, same
         // image(s)/timer as before.
@@ -1332,6 +1334,7 @@ window.startCheckout = async (method) => {
             attachToOrderId,
             couponCode: discount.couponCode || null,
             redeemPoints: discount.redeemPoints || 0,
+            redeemStampReward: !!discount.redeemStampReward,
             guestOrder,
             orderType,
             // Ignored server-side for a staff session (already tied to its
@@ -2835,6 +2838,56 @@ function renderHomeDeliveryTicker() {
     // that starts at padding-left:100%) never shows a visible gap between
     // one pass ending and the next beginning.
     root.innerHTML = `<span class="home-delivery-ticker-track">${escapeHtml(message)} &nbsp;&nbsp;&nbsp;&nbsp; ${escapeHtml(message)}</span>`;
+}
+
+/**
+ * 7-day stamp card widget - one stamp per calendar day ordered (tracked by
+ * phone number server-side, see GET /api/stamp-card), 7 stamps unlocks a
+ * free beverage redeemable at checkout. Hidden entirely if the shop hasn't
+ * turned this on (server reports {enabled:false}); shown with a sign-in
+ * prompt instead of a card for a fully anonymous visitor, since there's no
+ * phone yet to track stamps against.
+ */
+async function renderHomeStampCard() {
+    const root = document.getElementById("home-stamp-card");
+    if (!root) return;
+    let data = null;
+    let signedIn = session.authenticated;
+    try {
+        const res = await fetch("/api/stamp-card", { credentials: "include" });
+        if (res.ok) {
+            data = await res.json();
+        } else if (res.status === 401) {
+            signedIn = false;
+        }
+    } catch (e) {
+        data = null;
+    }
+    // Hidden entirely for a fully anonymous visitor - GET /api/stamp-card is
+    // session-gated, so there's no way to even know the feature is enabled
+    // without logging in or checking out as a guest first (which is also
+    // the only way a stamp could ever be tracked for them).
+    if (!signedIn) {
+        root.style.display = "none";
+        root.innerHTML = "";
+        return;
+    }
+    if (!data || !data.enabled) {
+        root.style.display = "none";
+        root.innerHTML = "";
+        return;
+    }
+    root.style.display = "block";
+    root.className = "home-stamp-card";
+
+    const stamps = data.stamps || 0;
+    const dots = Array.from({ length: 7 }, (_, i) => `<span class="stamp-dot${i < stamps ? " stamp-dot-filled" : ""}">☕</span>`).join("");
+    const rewardDot = `<span class="stamp-dot stamp-dot-reward${data.rewardReady ? " stamp-dot-ready" : ""}">🎁</span>`;
+    root.innerHTML = `
+        <div class="stamp-card-title">${t("home.stampCardTitle")}</div>
+        <div class="stamp-card-row">${dots}${rewardDot}</div>
+        <p class="stamp-card-note${data.rewardReady ? " stamp-card-note-ready" : ""}">${data.rewardReady ? t("home.stampCardReady") : t("home.stampCardProgress", { count: stamps })}</p>
+    `;
 }
 
 async function renderHomeStoreFacts() {

@@ -182,7 +182,10 @@
         "storeDetailsComingSoon": "दुकान का विवरण जल्द आ रहा है।",
         "cartBitsLabel": "कार्ट में बिट्स:",
         "favoritesOnly": "केवल पसंदीदा",
-        "jumpToCategory": "श्रेणी पर जाएं"
+        "jumpToCategory": "श्रेणी पर जाएं",
+        "stampCardTitle": "स्टैंप कार्ड",
+        "stampCardProgress": "7 में से {{count}} स्टैंप - अगला स्टैंप पाने के लिए आज ऑर्डर करें",
+        "stampCardReady": "मुफ़्त पेय अनलॉक हुआ! चेकआउट पर रिडीम करें।"
     },
     "menu": {
         "pageTitlePart1": "मेन्यू",

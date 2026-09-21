@@ -170,6 +170,10 @@ const COMBOS_FILE = path.join(DATA_DIR, "combos.json");
 const TABLE_SESSIONS_FILE = path.join(DATA_DIR, "table-sessions.json");
 const COUPONS_FILE = path.join(DATA_DIR, "coupons.json");
 const ARCADE_SCORES_FILE = path.join(DATA_DIR, "arcade-scores.json");
+// 7-day stamp card - keyed by phone number (not customerId), independent of
+// the points-based loyalty program above, so it also works for guest
+// checkouts. See the STAMP CARD section further down.
+const STAMP_CARDS_FILE = path.join(DATA_DIR, "stamp-cards.json");
 // Per-user settings that aren't tied to any one feature enough to live on the
 // user record itself (users.json) - starts with just the staff nav layout
 // choice (rail/top-bar), keyed by userId so it follows a person across
@@ -322,6 +326,13 @@ if (!fs.existsSync(CONFIG_FILE)) {
       enabled: true,
       pointsPerRupeeSpent: 0.1, // e.g. 0.1 = 1 point per Rs.10 spent
       rupeeValuePerPoint: 0.5 // e.g. 0.5 = each point is worth Rs.0.50 off
+    },
+    // 7-day stamp card (one stamp per calendar day ordered, 7 stamps unlocks
+    // a free beverage) - off by default since it's a new promotional
+    // mechanic that changes what customers see on Home/checkout; a shop
+    // opts in from Discounts & Loyalty same as it would for a coupon.
+    stampCard: {
+      enabled: false
     }
     // Table count and arcade settings (Operations) used to live here, but
     // are now fully per-store - see DEFAULT_STORE_OPERATIONS and each
@@ -1249,7 +1260,55 @@ function resolveComboLine(requested, menu, combos) {
   return lines;
 }
 
-function computeOrder(items, method, serviceChargeActive, tipApplied, { couponCode = null, redeemPoints = 0, customerId = null, storeId = null } = {}) {
+// ---------------------------------------------------------------------------
+// 7-DAY STAMP CARD - independent of config.loyalty's points program above,
+// and keyed by phone number rather than customerId so it also works for
+// guest checkouts (same "same phone = same person" treatment favorites/My
+// Orders already give a guest with no account). One stamp per calendar day
+// a phone places an order; filling all 7 unlocks one free beverage;
+// redeeming it empties the card back to zero.
+// ---------------------------------------------------------------------------
+
+function getStampCard(phone) {
+  if (!phone) return null;
+  return readJson(STAMP_CARDS_FILE, []).find((c) => c.phone === phone) || null;
+}
+
+function awardStampCardVisit(phone) {
+  if (!phone) return;
+  const cards = readJson(STAMP_CARDS_FILE, []);
+  let card = cards.find((c) => c.phone === phone);
+  if (!card) {
+    card = { phone, stampDates: [], rewardReady: false, rewardsRedeemed: 0 };
+    cards.push(card);
+  }
+  const today = dateStamp(new Date());
+  // A full, unredeemed card just waits for the free-beverage order - it
+  // doesn't lose or gain stamps in the meantime.
+  if (card.rewardReady || card.stampDates.includes(today)) return;
+  card.stampDates.push(today);
+  card.stampDates.sort();
+  if (card.stampDates.length >= 7) card.rewardReady = true;
+  writeJson(STAMP_CARDS_FILE, cards);
+}
+
+function redeemStampCard(phone) {
+  const cards = readJson(STAMP_CARDS_FILE, []);
+  const card = cards.find((c) => c.phone === phone);
+  if (!card) return;
+  card.stampDates = [];
+  card.rewardReady = false;
+  card.rewardsRedeemed = (card.rewardsRedeemed || 0) + 1;
+  writeJson(STAMP_CARDS_FILE, cards);
+}
+
+function computeOrder(
+  items,
+  method,
+  serviceChargeActive,
+  tipApplied,
+  { couponCode = null, redeemPoints = 0, customerId = null, storeId = null, phone = null, redeemStampReward = false } = {}
+) {
   const menu = readJson(MENU_FILE, { items: [] });
   // Tax/currency resolved through the store's own override (if any) on top
   // of the franchise-wide default - never trust a raw global read here,
@@ -1351,7 +1410,29 @@ function computeOrder(items, method, serviceChargeActive, tipApplied, { couponCo
     }
   }
 
-  const discountAmount = round2(couponDiscount + loyaltyDiscount);
+  // 7-day stamp card free-beverage redemption - see the STAMP CARD section
+  // further down for how a card fills up. Fully waives one beverage's price
+  // (not a percent/point-value discount like the two above), and only if the
+  // card is actually complete and the cart has a real beverage to waive -
+  // "redeem a free beverage" isn't meaningful against a cart with none.
+  let stampRewardDiscount = 0;
+  let stampRewardItemId = null;
+  const stampCardConfig = config.stampCard || {};
+  if (redeemStampReward && stampCardConfig.enabled && phone) {
+    const card = getStampCard(phone);
+    if (!card || !card.rewardReady) {
+      throw new Error("Your stamp card isn't ready to redeem yet");
+    }
+    const beverages = resolvedItems.filter((i) => i.station === "BARISTA");
+    const cheapestBeverage = beverages.length ? beverages.reduce((a, b) => (b.price < a.price ? b : a)) : null;
+    if (!cheapestBeverage) {
+      throw new Error("Add a beverage to your cart to redeem your free drink");
+    }
+    stampRewardDiscount = cheapestBeverage.price;
+    stampRewardItemId = cheapestBeverage.id;
+  }
+
+  const discountAmount = round2(couponDiscount + loyaltyDiscount + stampRewardDiscount);
   const taxableAmount = Math.max(0, subtotal - discountAmount);
   // New points are earned on what the customer actually pays, i.e. after
   // discounts - computed here (pure), credited to the account by the caller
@@ -1383,6 +1464,8 @@ function computeOrder(items, method, serviceChargeActive, tipApplied, { couponCo
     loyaltyPointsRedeemed,
     loyaltyDiscount,
     loyaltyPointsEarned,
+    stampRewardDiscount,
+    stampRewardItemId,
     cgst: round2(cgst),
     sgst: round2(sgst),
     serviceCharge: round2(serviceCharge),
@@ -3444,6 +3527,9 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
     config.loyalty.pointsPerRupeeSpent = Number.isFinite(per) && per >= 0 ? per : 0.1;
     config.loyalty.rupeeValuePerPoint = Number.isFinite(val) && val >= 0 ? val : 0.5;
   }
+  if (body.stampCard && typeof body.stampCard === "object") {
+    config.stampCard = { enabled: Boolean(body.stampCard.enabled) };
+  }
   if (config.defaultNavLayout !== undefined && config.defaultNavLayout !== "rail" && config.defaultNavLayout !== "topbar") {
     config.defaultNavLayout = "rail";
   }
@@ -4796,7 +4882,9 @@ route("POST", /^\/api\/orders\/?$/, async (req, res) => {
       couponCode: body.couponCode || null,
       redeemPoints: parseInt(body.redeemPoints, 10) || 0,
       customerId,
-      storeId: effectiveStoreId
+      storeId: effectiveStoreId,
+      phone,
+      redeemStampReward: !!body.redeemStampReward
     });
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
@@ -4924,6 +5012,17 @@ route("POST", /^\/api\/orders\/?$/, async (req, res) => {
     if (user) {
       user.loyaltyPoints = Math.max(0, (user.loyaltyPoints || 0) - order.loyaltyPointsRedeemed + order.loyaltyPointsEarned);
       writeJson(USERS_FILE, users);
+    }
+  }
+  // Stamp card: redeeming this order's free beverage empties the card
+  // instead of also stamping today's visit - stamping only happens on a
+  // normal (non-redeeming) order, capped at one per calendar day regardless
+  // of how many orders that phone places today.
+  if (phone && (readJson(CONFIG_FILE, {}).stampCard || {}).enabled) {
+    if (order.stampRewardDiscount > 0) {
+      redeemStampCard(phone);
+    } else {
+      awardStampCardVisit(phone);
     }
   }
   // Decrement stock for any tracked item (combo lines included - they carry
@@ -6775,6 +6874,46 @@ function getLanIPs() {
 route("GET", /^\/api\/network-info\/?$/, async (req, res) => {
   if (!requireSession(req, res)) return;
   sendJson(res, 200, { port: PORT, urls: getLanIPs().map((ip) => `http://${ip}:${PORT}`) });
+});
+
+// Current phone's stamp card status - any authenticated session (customer,
+// guest, or staff, though staff sessions have no phone and just get zeros).
+// Reports {enabled:false} outright when the shop hasn't turned this on, so
+// the client never needs a separate "is this feature on" check.
+route("GET", /^\/api\/stamp-card\/?$/, async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
+  const stampCardConfig = readJson(CONFIG_FILE, {}).stampCard || {};
+  if (!stampCardConfig.enabled) return sendJson(res, 200, { enabled: false });
+  const card = getStampCard(session.phone || null);
+  sendJson(res, 200, {
+    enabled: true,
+    stamps: card ? card.stampDates.length : 0,
+    rewardReady: card ? card.rewardReady : false
+  });
+});
+
+// Checkout-time "how much would redeeming my stamp card actually take off
+// this cart" preview - reuses computeOrder()'s real pricing/eligibility
+// logic (same call the order-creation route itself makes) rather than
+// duplicating the "cheapest beverage in cart" rule client-side, so this can
+// never drift out of sync with what actually happens at checkout. Never
+// writes anything - just prices a hypothetical cart.
+route("POST", /^\/api\/stamp-card\/preview\/?$/, async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
+  const body = await readBody(req);
+  const storeId = session.storeId != null ? session.storeId : Number.isFinite(Number(body.storeId)) ? Number(body.storeId) : null;
+  try {
+    const computed = computeOrder(Array.isArray(body.items) ? body.items : [], "COUNTER", false, false, {
+      phone: session.phone || null,
+      redeemStampReward: true,
+      storeId
+    });
+    sendJson(res, 200, { eligible: computed.stampRewardDiscount > 0, discountAmount: computed.stampRewardDiscount });
+  } catch (e) {
+    sendJson(res, 200, { eligible: false, discountAmount: 0, error: e.message });
+  }
 });
 
 server.listen(PORT, () => {

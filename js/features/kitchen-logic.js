@@ -49,6 +49,7 @@ export const KitchenSystem = {
             attachToOrderId = null,
             couponCode = null,
             redeemPoints = 0,
+            redeemStampReward = false,
             guestOrder = false,
             orderType = "takeaway",
             storeId = null,
@@ -78,6 +79,7 @@ export const KitchenSystem = {
                 attachToOrderId,
                 couponCode,
                 redeemPoints,
+                redeemStampReward,
                 guestOrder,
                 orderType,
                 // Only meaningful for a customer/guest session (no storeId of
