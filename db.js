@@ -137,6 +137,8 @@ function migrateExistingJsonFiles(fileConstants) {
   return migratedCount;
 }
 
+let dbPath = null;
+
 /** Opens (creating if needed) data/app.db and, ONLY the very first time
  *  it's created, imports any pre-existing data/*.json files from an older
  *  install - so a real upgrade migrates automatically on next boot, but a
@@ -144,7 +146,7 @@ function migrateExistingJsonFiles(fileConstants) {
  *  from stale JSON files sitting next to it. */
 function initDb(dataDir, fileConstants) {
   if (db) return { migratedCount: 0 };
-  const dbPath = path.join(dataDir, "app.db");
+  dbPath = path.join(dataDir, "app.db");
   const isFreshDb = !fs.existsSync(dbPath);
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
@@ -152,4 +154,40 @@ function initDb(dataDir, fileConstants) {
   return { migratedCount };
 }
 
-module.exports = { initDb, readJson, writeJson, jsonExists, readJsonFile, writeJsonFile, migrateExistingJsonFiles };
+/** Hot online backup of the whole live database to a new file, using
+ *  better-sqlite3's own .backup() (safe to run while the server keeps
+ *  handling requests - unlike copying the raw file, which could catch a
+ *  write mid-flight). Replaces the old "read every JSON file into one
+ *  blob" approach both backup routes in server.js used, now that all data
+ *  lives in this one file. */
+async function backupTo(destPath) {
+  await db.backup(destPath);
+}
+
+/** Overwrites the live database with a previously backed-up file - closes
+ *  the current connection, swaps app.db, clears any stale -wal/-shm
+ *  sidecar files (so they can't get replayed against the new file's
+ *  different contents), then reopens. Validates the SQLite file header
+ *  first so a corrupted/wrong file fails loudly before touching anything,
+ *  rather than leaving the app half-restored. */
+function restoreFromBuffer(buffer) {
+  if (buffer.length < 16 || buffer.toString("utf8", 0, 15) !== "SQLite format 3") {
+    throw new Error("That doesn't look like a valid database backup file");
+  }
+  if (db) {
+    db.close();
+    db = null;
+  }
+  fs.writeFileSync(dbPath, buffer);
+  for (const ext of ["-wal", "-shm"]) {
+    try {
+      fs.unlinkSync(dbPath + ext);
+    } catch (e) {
+      // Fine if it never existed.
+    }
+  }
+  db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+}
+
+module.exports = { initDb, readJson, writeJson, jsonExists, readJsonFile, writeJsonFile, migrateExistingJsonFiles, backupTo, restoreFromBuffer };

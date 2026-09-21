@@ -10,9 +10,37 @@ services:
       OWNER_PASSWORD: changeme123
       # UPI_VPA:
       # UPI_PAYEE_NAME:
+      # Dev/test defaults - point these at real AWS S3 (drop S3_ENDPOINT/
+      # S3_FORCE_PATH_STYLE entirely, set real credentials) for production.
+      # See README.md's "Image uploads" section.
+      S3_ENDPOINT: http://localstack:4566
+      S3_BUCKET: sbc-uploads
+      S3_FORCE_PATH_STYLE: "1"
+      S3_ACCESS_KEY_ID: test
+      S3_SECRET_ACCESS_KEY: test
     volumes:
       # Everything that must survive a rebuild/redeploy - separate from the
       # image's own bundled code, same separation main.js keeps for the
-      # desktop build (see README's "Where files are stored").
+      # desktop build (see README's "Where files are stored"). Uploaded
+      # images no longer live here - see the localstack service's own
+      # volume below - just data/app.db (SQLite), logs, and backups now.
       - ./volume-data:/data
+    depends_on:
+      - localstack
+    restart: unless-stopped
+
+  # Dev/test-only S3-compatible storage - emulates the real AWS S3 API so
+  # the exact same code path runs against it as against production, per
+  # LocalStack's own intended use (see their docs: not recommended as a
+  # permanent production backend). Swap this whole service out for real
+  # AWS S3 credentials in a production compose file/environment instead of
+  # trying to run LocalStack there.
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3
+    volumes:
+      - ./volume-localstack:/var/lib/localstack
     restart: unless-stopped

@@ -29,6 +29,7 @@
       "main.js",
       "server.js",
       "db.js",
+      "s3.js",
       "index.html",
       "css/**/*",
       "js/**/*",
@@ -41,7 +42,9 @@
     "directories": {
       "output": "dist"
     },
-    "asarUnpack": ["node_modules/better-sqlite3/**/*"],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
     "win": {
       "target": "nsis"
     },
@@ -61,6 +64,7 @@
     }
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1137.0",
     "better-sqlite3": "^13.0.3"
   }
 }

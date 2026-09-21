@@ -1178,7 +1178,7 @@ export const AdminPortal = {
         root.innerHTML = `
             <div class="config-controls">
                 <h3 style="margin-top:0;">BACKUP</h3>
-                <p class="admin-help-text">Downloads every record this app stores (menu, orders, staff accounts, config, etc.) as one JSON file. Uploaded images themselves aren't included, only their filenames/metadata - keep the "uploads" folder alongside any backup you keep long-term.</p>
+                <p class="admin-help-text">Downloads a complete copy of this app's database (menu, orders, staff accounts, config, everything). Uploaded photos aren't included in this file - they're already stored durably in the cloud, separate from this database.</p>
                 <button class="admin-btn-primary" id="backup-download">DOWNLOAD BACKUP</button>
 
                 ${
@@ -1198,7 +1198,7 @@ export const AdminPortal = {
                 <p class="admin-help-text" style="color:var(--color-danger);">Overwrites current data with whatever's in the backup file - menu, orders, staff accounts, everything it contains. This can't be undone. Only restore a backup you trust.</p>
                 <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
                     <label for="restore-file-input" class="admin-btn-secondary" style="cursor:pointer;">CHOOSE FILE</label>
-                    <input type="file" id="restore-file-input" accept="application/json" style="display:none;" />
+                    <input type="file" id="restore-file-input" accept=".db" style="display:none;" />
                     <span id="restore-file-name" style="font-size:11px; color:var(--color-text-muted);">No file selected.</span>
                 </div>
                 <button class="admin-btn-secondary" id="restore-upload" style="border-color:var(--color-danger); color:var(--color-danger);" disabled>RESTORE FROM BACKUP</button>
@@ -1210,22 +1210,18 @@ export const AdminPortal = {
 
             <div class="config-controls" style="margin-top:20px;">
                 <h3 style="margin-top:0;">ENCRYPTED BACKUP (for off-site storage)</h3>
-                <p class="admin-help-text">Unlike the plain backup above, this includes the actual uploaded photos too - one file with everything needed to rebuild this shop on a brand new computer. Encrypted with a passphrase YOU set. <strong style="color:var(--color-danger);">There is no recovery if you forget it</strong> - that's what makes it real encryption. Store this file somewhere off this machine (Google Drive, a USB drive, email it to yourself).</p>
+                <p class="admin-help-text">Same database as the plain backup above, encrypted with a passphrase YOU set - meant for storing off this machine. <strong style="color:var(--color-danger);">There is no recovery if you forget it</strong> - that's what makes it real encryption. Store this file somewhere off this machine (Google Drive, a USB drive, email it to yourself).</p>
                 <div class="control-group" style="max-width:320px;">
                     <label for="ebackup-passphrase">PASSPHRASE (min. 8 characters)</label>
                     <input type="password" id="ebackup-passphrase" autocomplete="new-password" />
                 </div>
-                <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--color-text-muted); cursor:pointer; margin-top:10px;">
-                    <input type="checkbox" id="ebackup-include-archives" />
-                    INCLUDE FULL ORDER HISTORY (orders older than a year, moved to yearly archives to keep routine backups small - off by default, check this for a true complete copy)
-                </label>
                 <button class="admin-btn-primary" id="ebackup-download" style="margin-top:10px;">DOWNLOAD ENCRYPTED BACKUP</button>
 
                 ${
                     canRestore
                         ? `
                 <h3 style="margin-top:25px; border-top:1px solid var(--color-border); padding-top:20px;">RESTORE FROM ENCRYPTED BACKUP</h3>
-                <p class="admin-help-text" style="color:var(--color-danger);">Same as the plain restore above (overwrites everything, can't be undone) - plus it puts back the uploaded photos this backup captured.</p>
+                <p class="admin-help-text" style="color:var(--color-danger);">Same as the plain restore above (overwrites everything, can't be undone), just decrypted with the passphrase below first.</p>
                 <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
                     <label for="erestore-file-input" class="admin-btn-secondary" style="cursor:pointer;">CHOOSE FILE</label>
                     <input type="file" id="erestore-file-input" accept=".sbcbackup" style="display:none;" />
@@ -1261,7 +1257,6 @@ export const AdminPortal = {
                 errorEl.textContent = "Passphrase must be at least 8 characters";
                 return;
             }
-            const includeArchives = document.getElementById("ebackup-include-archives").checked;
             const btn = document.getElementById("ebackup-download");
             btn.disabled = true;
             btn.textContent = "PREPARING…";
@@ -1270,7 +1265,7 @@ export const AdminPortal = {
                     method: "POST",
                     credentials: "include",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ passphrase, includeArchives })
+                    body: JSON.stringify({ passphrase })
                 });
                 if (!res.ok) throw new Error((await res.json()).error || "Could not create backup");
                 const blob = await res.blob();
@@ -1343,7 +1338,7 @@ export const AdminPortal = {
             }
             renderInfoModal({
                 title: "RESTORE FROM ENCRYPTED BACKUP",
-                message: `This will overwrite current menu, orders, staff accounts, settings, and uploaded photos with the contents of "${escapeHtmlAttr(encryptedRestoreFile.name)}". This can't be undone. Continue?`,
+                message: `This will overwrite current menu, orders, staff accounts, and settings with the contents of "${escapeHtmlAttr(encryptedRestoreFile.name)}". This can't be undone. Continue?`,
                 confirmText: "RESTORE",
                 cancelText: "CANCEL",
                 onConfirm: async () => {
@@ -1375,8 +1370,7 @@ export const AdminPortal = {
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.error || "Restore failed");
-                        const archiveNote = data.archivesRestored ? ` and ${data.archivesRestored} archive year(s)` : "";
-                        ok(`Restored ${data.restoredCount} file(s), ${data.uploadsRestored} photo(s)${archiveNote} - reloading…`);
+                        ok("Backup restored - reloading…");
                         setTimeout(() => window.location.reload(), 1200);
                     } catch (e) {
                         errorEl.textContent = e.message || "Could not restore backup";
@@ -1404,17 +1398,25 @@ export const AdminPortal = {
                     const errorEl = document.getElementById("backup-error");
                     errorEl.textContent = "";
                     try {
-                        const text = await restoreFile.text();
-                        const parsed = JSON.parse(text);
+                        // Same FileReader-to-base64 approach as the encrypted
+                        // restore above - the backup file is a raw SQLite
+                        // database now, not JSON text.
+                        const dataUrl = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.onerror = () => reject(new Error("Could not read that file"));
+                            reader.readAsDataURL(restoreFile);
+                        });
+                        const dataBase64 = dataUrl.replace(/^data:[^;]*;base64,/, "");
                         const res = await fetch("/api/admin/restore", {
                             method: "POST",
                             credentials: "include",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ ...parsed, confirmYes: true })
+                            body: JSON.stringify({ confirmYes: true, dataBase64 })
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.error || "Restore failed");
-                        ok(`Restored ${data.restoredCount} file(s) - reloading…`);
+                        ok("Backup restored - reloading…");
                         setTimeout(() => window.location.reload(), 1200);
                     } catch (e) {
                         errorEl.textContent = e.message || "Could not restore backup";

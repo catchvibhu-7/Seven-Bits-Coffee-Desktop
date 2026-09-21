@@ -54,14 +54,13 @@ const SEED_DIR = path.join(ROOT_DIR, "data-seed");
 // entirely means a future change to data/'s own handling can't accidentally
 // re-expose it alongside them.
 const UPLOADS_DIR = process.env.SBC_UPLOADS_DIR || path.join(ROOT_DIR, "uploads");
-// Where orders older than ORDER_COMPACTION_DAYS get moved (full detail
-// intact) once compactOldOrders() summarizes their entry in ORDERS_FILE -
-// see the ORDER HISTORY COMPACTION section further down. Lives under
-// DATA_DIR itself (not its own top-level SBC_*_DIR override) since, unlike
-// uploads, nothing ever serves these by URL - they're just bigger JSON
-// files that don't need to move independently of the rest of data/.
+// Legacy yearly order archives from an older version of this app (before
+// active order compaction was removed in favor of just keeping everything
+// in the SQLite orders table) - kept only so findFullOrder() can still read
+// orders an already-upgraded install archived under the old system. Lives
+// under DATA_DIR itself (not its own top-level SBC_*_DIR override) since,
+// unlike uploads, nothing ever serves these by URL.
 const ARCHIVES_DIR = path.join(DATA_DIR, "archives");
-const ORDER_COMPACTION_DAYS = 365;
 // Diagnostic event log (boot, crashes, orders placed, auth attempts) -
 // distinct from AUDIT_LOG_FILE below, which is a business-facing record of
 // staff actions (owner-readable in the admin panel). This one is a plain
@@ -144,7 +143,24 @@ process.on("unhandledRejection", (reason) => {
 // (bundled data-seed/ templates, ARCHIVES_DIR yearly order archives).
 // ---------------------------------------------------------------------------
 
-const { initDb, readJson, writeJson, jsonExists, readJsonFile, writeJsonFile } = require("./db.js");
+const { initDb, readJson, writeJson, jsonExists, readJsonFile, writeJsonFile, backupTo, restoreFromBuffer } = require("./db.js");
+const s3 = require("./s3.js");
+
+/** Hot backup of the live app.db to a temp file, read back as a Buffer,
+ *  temp file removed - the one building block both the plain and encrypted
+ *  whole-instance backup routes need (see BACKUP_ENCRYPTION section
+ *  further down). Uploaded images are never bundled here (unlike the old
+ *  JSON-file-era backups) - they live in S3 now, already off this machine,
+ *  already durable, so there's nothing local left to capture for them. */
+async function getDbSnapshotBuffer() {
+  const tmpPath = path.join(DATA_DIR, `.backup-snapshot-${crypto.randomBytes(6).toString("hex")}.db`);
+  await backupTo(tmpPath);
+  try {
+    return fs.readFileSync(tmpPath);
+  } finally {
+    fs.unlinkSync(tmpPath);
+  }
+}
 
 // Migrates any pre-existing data/*.json files into data/app.db the first
 // time this runs against a given data dir (no-op on every later boot, and
@@ -3947,7 +3963,12 @@ route("POST", /^\/api\/uploads\/?$/, async (req, res) => {
   }
   const id = crypto.randomBytes(8).toString("hex");
   const filename = `${id}${ext}`;
-  fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
+  try {
+    await s3.putObject(filename, buffer, mimeType);
+  } catch (e) {
+    logEvent("error", "S3 upload failed", { message: e.message });
+    return sendJson(res, 502, { error: "Could not store the image - check S3/LocalStack configuration" });
+  }
 
   const uploads = readJson(UPLOADS_MANIFEST_FILE, []);
   const entry = {
@@ -4010,9 +4031,9 @@ route("DELETE", /^\/api\/uploads\/(?<id>[\w-]+)\/?$/, async (req, res, params, u
     return sendJson(res, 409, { error: `Still used by: ${usedIn.join(", ")}`, usedIn });
   }
   try {
-    fs.unlinkSync(path.join(UPLOADS_DIR, entry.filename));
+    await s3.deleteObject(entry.filename);
   } catch (e) {
-    // Already gone from disk somehow - still clean up the manifest entry below.
+    // Already gone from S3 somehow - still clean up the manifest entry below.
   }
   writeJson(
     UPLOADS_MANIFEST_FILE,
@@ -4072,6 +4093,13 @@ function decryptBackup(payload, passphrase) {
   decipher.setAuthTag(authTag);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]); // throws on wrong passphrase / corrupted file
 }
+// Still used by POST /api/admin/restore/demo below (loading the bundled
+// demo catalog is a per-table MERGE into the live database, not a whole-
+// database swap - see applyBackupPayload()) - no longer used by the whole-
+// instance backup/restore routes, which now snapshot/restore the entire
+// app.db file directly instead of file-by-file (see getDbSnapshotBuffer()
+// near the top of this file and BACKUP_FILES' own history in git blame if
+// you're wondering why this still exists).
 const BACKUP_FILES = {
   "config.json": CONFIG_FILE,
   "menu.json": MENU_FILE,
@@ -4093,52 +4121,20 @@ const BACKUP_FILES = {
   "branding-profiles.json": BRANDING_PROFILES_FILE
 };
 
-/** Shared by the manual encrypted-download route below and the automatic
- *  scheduled local backups (see AUTOMATIC LOCAL BACKUPS section further
- *  down) - both need the exact same "every JSON record plus every actual
- *  uploaded file" snapshot, just handled differently afterward (one gets
- *  encrypted for download, the other gets gzipped straight to disk).
- *
- *  includeArchives (off by default, and never set true by the automatic
- *  scheduled backups) bundles the full-detail yearly order archives too
- *  (see ORDER HISTORY COMPACTION further down) - opt-in because the whole
- *  point of compacting old orders out of orders.json in the first place
- *  was to keep routine backups from growing forever; folding the archives
- *  back in on every automatic backup would silently undo that. */
-function buildBackupPayload({ includeArchives = false } = {}) {
-  const files = {};
-  for (const [name, filePath] of Object.entries(BACKUP_FILES)) {
-    files[name] = readJson(filePath, null);
-  }
-  const uploads = {};
-  for (const filename of fs.readdirSync(UPLOADS_DIR)) {
-    uploads[filename] = fs.readFileSync(path.join(UPLOADS_DIR, filename)).toString("base64");
-  }
-  const payload = { exportedAt: new Date().toISOString(), files, uploads };
-  if (includeArchives) {
-    const archives = {};
-    for (const filename of fs.readdirSync(ARCHIVES_DIR)) {
-      archives[filename] = readJsonFile(path.join(ARCHIVES_DIR, filename), []);
-    }
-    payload.archives = archives;
-  }
-  return payload;
-}
-
+// Owner-only, unencrypted - the whole live app.db, straight off SQLite's own
+// hot-backup API. No longer a JSON blob (there's no single-file JSON
+// representation of a SQLite database), and no longer bundles uploaded
+// images (they live in S3 now - already off this machine, already durable,
+// nothing local left to capture for them).
 route("GET", /^\/api\/admin\/backup\/?$/, async (req, res) => {
   const session = requireRole(req, res, ["owner"]);
   if (!session) return;
-  const files = {};
-  for (const [name, filePath] of Object.entries(BACKUP_FILES)) {
-    files[name] = readJson(filePath, null);
-  }
-  const backup = { exportedAt: new Date().toISOString(), files };
-  const body = JSON.stringify(backup, null, 2);
+  const snapshot = await getDbSnapshotBuffer();
   res.writeHead(200, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Disposition": `attachment; filename="backup-${new Date().toISOString().slice(0, 10)}.json"`
+    "Content-Type": "application/octet-stream",
+    "Content-Disposition": `attachment; filename="backup-${new Date().toISOString().slice(0, 10)}.db"`
   });
-  res.end(body);
+  res.end(snapshot);
 });
 
 route("POST", /^\/api\/admin\/backup\/encrypted\/?$/, async (req, res) => {
@@ -4150,15 +4146,11 @@ route("POST", /^\/api\/admin\/backup\/encrypted\/?$/, async (req, res) => {
     return sendJson(res, 400, { error: "Passphrase must be at least 8 characters" });
   }
 
-  const payload = buildBackupPayload({ includeArchives: !!body.includeArchives });
-  const plaintext = zlib.gzipSync(Buffer.from(JSON.stringify(payload), "utf8"));
+  const snapshot = await getDbSnapshotBuffer();
+  const plaintext = zlib.gzipSync(snapshot);
   const encrypted = encryptBackup(plaintext, passphrase);
 
-  logEvent("info", "Encrypted backup created", {
-    by: session.name,
-    uploadCount: Object.keys(payload.uploads).length,
-    includedArchives: !!payload.archives
-  });
+  logEvent("info", "Encrypted backup created", { by: session.name, sizeBytes: encrypted.length });
   res.writeHead(200, {
     "Content-Type": "application/octet-stream",
     "Content-Disposition": `attachment; filename="seven-bits-coffee-backup-${new Date().toISOString().slice(0, 10)}.sbcbackup"`
@@ -4166,7 +4158,7 @@ route("POST", /^\/api\/admin\/backup\/encrypted\/?$/, async (req, res) => {
   res.end(encrypted);
 });
 
-// Same destructive-action gating as the plain restore above (Global Admin
+// Same destructive-action gating as the plain restore below (Global Admin
 // only, explicit confirmYes) plus a passphrase that has to actually decrypt
 // something - a wrong passphrase or a corrupted/tampered file fails loudly
 // (see decryptBackup()) rather than restoring garbage.
@@ -4175,7 +4167,7 @@ route("POST", /^\/api\/admin\/restore\/encrypted\/?$/, async (req, res) => {
   if (!session) return;
   let body;
   try {
-    body = await readBody(req, 30 * 1024 * 1024); // backups can run a few MB once uploaded photos are included
+    body = await readBody(req, 30 * 1024 * 1024); // a whole database file can run a few MB
   } catch (e) {
     return sendJson(res, 413, { error: "Backup file too large" });
   }
@@ -4183,35 +4175,29 @@ route("POST", /^\/api\/admin\/restore\/encrypted\/?$/, async (req, res) => {
     return sendJson(res, 400, { error: "Missing confirmation" });
   }
   const passphrase = String(body.passphrase || "");
-  let payload;
+  let snapshot;
   try {
     const encrypted = Buffer.from(String(body.dataBase64 || ""), "base64");
-    const plaintext = zlib.gunzipSync(decryptBackup(encrypted, passphrase));
-    payload = JSON.parse(plaintext.toString("utf8"));
+    snapshot = zlib.gunzipSync(decryptBackup(encrypted, passphrase));
   } catch (e) {
     return sendJson(res, 400, { error: "Wrong passphrase, or this isn't a valid backup file" });
   }
-  if (!payload.files || typeof payload.files !== "object") {
-    return sendJson(res, 400, { error: "That doesn't look like a backup file" });
+  try {
+    restoreFromBuffer(snapshot);
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
   }
-
-  const { restoredCount, uploadsRestored, archivesRestored } = applyBackupPayload({
-    files: payload.files,
-    uploads: payload.uploads,
-    archives: payload.archives
-  });
-  logEvent("warn", "Whole-instance restore applied (encrypted backup)", { restoredCount, uploadsRestored, archivesRestored, by: session.name });
-  sendJson(res, 200, { ok: true, restoredCount, uploadsRestored, archivesRestored });
+  logEvent("warn", "Whole-instance restore applied (encrypted backup)", { by: session.name });
+  sendJson(res, 200, { ok: true });
 });
 
-/** Shared by the plain-JSON restore route below and the encrypted-backup
- *  restore route further down (see BACKUP_ENCRYPTION section) - same
- *  destructive whole-instance restore either way, just a different wrapper
- *  around getting `{files, uploads}` onto disk. `uploads` (added for the
- *  encrypted backup, which - unlike the plain JSON export - actually
- *  captures the real uploaded files, not just uploads.json's metadata
- *  about them) is a map of filename -> base64 content under UPLOADS_DIR. */
-function applyBackupPayload({ files, uploads, archives }) {
+/** Merges the bundled demo catalog's records into the live database, one
+ *  table at a time - used only by POST /api/admin/restore/demo below,
+ *  NOT by the whole-instance backup/restore routes above (those replace
+ *  the entire app.db file instead, see restoreFromBuffer() in db.js).
+ *  `uploads` (filename -> base64 content) get pushed to S3 - the demo
+ *  bundle's own photos, not anything a caller uploads freeform. */
+async function applyBackupPayload({ files, uploads }) {
   // A backup taken before someone deleted their account would otherwise
   // resurrect that account's real login credentials the moment it's
   // restored - capture who's currently deleted BEFORE users.json gets
@@ -4262,14 +4248,16 @@ function applyBackupPayload({ files, uploads, archives }) {
   let uploadsRestored = 0;
   if (uploads && typeof uploads === "object") {
     for (const [filename, base64] of Object.entries(uploads)) {
-      // Filenames in a backup always came from this same server's own
-      // upload route (crypto.randomBytes hex + a fixed extension - see
-      // POST /api/uploads) - never trust that blindly on the way back in
-      // from a file someone could hand-edit, so re-validate the shape
-      // before it touches a real filesystem path.
+      // Filenames always came from this same server's own upload route
+      // (crypto.randomBytes hex + a fixed extension - see POST
+      // /api/uploads) - never trust that blindly on the way back in from a
+      // file someone could hand-edit, so re-validate the shape before it
+      // becomes an S3 key.
       if (!/^[a-f0-9]{16}\.(png|jpg|jpeg|gif|webp)$/i.test(filename)) continue;
       try {
-        fs.writeFileSync(path.join(UPLOADS_DIR, filename), Buffer.from(base64, "base64"));
+        const ext = filename.slice(filename.lastIndexOf(".") + 1).toLowerCase();
+        const mimeType = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" }[ext];
+        await s3.putObject(filename, Buffer.from(base64, "base64"), mimeType);
         uploadsRestored++;
       } catch (e) {
         // One bad file shouldn't abort restoring everything else.
@@ -4277,46 +4265,33 @@ function applyBackupPayload({ files, uploads, archives }) {
     }
   }
 
-  let archivesRestored = 0;
-  if (archives && typeof archives === "object") {
-    for (const [filename, records] of Object.entries(archives)) {
-      // Archive filenames are always this server's own "orders-<YEAR>.json"
-      // shape - same re-validate-before-touching-a-real-path reasoning as
-      // the uploads filenames above.
-      if (!/^orders-\d{4}\.json$/.test(filename) || !Array.isArray(records)) continue;
-      try {
-        writeJsonFile(path.join(ARCHIVES_DIR, filename), records);
-        archivesRestored++;
-      } catch (e) {
-        // One bad archive file shouldn't abort restoring everything else.
-      }
-    }
-  }
-
-  return { restoredCount, uploadsRestored, archivesRestored };
+  return { restoredCount, uploadsRestored };
 }
 
 // Whole-instance restore is the single most destructive route in the app -
 // tightened to Global Admin only (owner keeps read/download above, but
 // never writes here, matching read-only-outside-adding-Global-Admins).
+// Same shape as the encrypted restore above, just without the passphrase -
+// a whole-database-file upload (base64), not the old files-as-JSON body.
 route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
   const session = requireGlobalAdmin(req, res);
   if (!session) return;
   let body;
   try {
-    body = await readBody(req, 20 * 1024 * 1024); // backups can be a few MB with enough order history
+    body = await readBody(req, 20 * 1024 * 1024); // a whole database file can run a few MB
   } catch (e) {
     return sendJson(res, 413, { error: "Backup file too large" });
   }
   if (!body.confirmYes) {
     return sendJson(res, 400, { error: "Missing confirmation" });
   }
-  if (!body.files || typeof body.files !== "object") {
-    return sendJson(res, 400, { error: "That doesn't look like a backup file" });
+  try {
+    restoreFromBuffer(Buffer.from(String(body.dataBase64 || ""), "base64"));
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
   }
-  const { restoredCount } = applyBackupPayload({ files: body.files, uploads: null });
-  logEvent("warn", "Whole-instance restore applied (plain backup)", { restoredCount, by: session.name });
-  sendJson(res, 200, { ok: true, restoredCount });
+  logEvent("warn", "Whole-instance restore applied (plain backup)", { by: session.name });
+  sendJson(res, 200, { ok: true });
 });
 
 // Whether this build ships the demo bundle at all - main.js sets
@@ -4350,7 +4325,7 @@ route("POST", /^\/api\/admin\/restore\/demo\/?$/, async (req, res) => {
   if (!payload || !payload.files) {
     return sendJson(res, 404, { error: "No demo data bundled with this build" });
   }
-  const { restoredCount, uploadsRestored } = applyBackupPayload({ files: payload.files, uploads: payload.uploads });
+  const { restoredCount, uploadsRestored } = await applyBackupPayload({ files: payload.files, uploads: payload.uploads });
   logEvent("warn", "Demo data loaded", { restoredCount, uploadsRestored, by: session.name });
   sendJson(res, 200, { ok: true, restoredCount, uploadsRestored });
 });
@@ -4374,16 +4349,16 @@ function dateStamp(d) {
   return d.toISOString().slice(0, 10); // YYYY-MM-DD, always UTC - see cleanupOldBackups()'s own note on why that's fine
 }
 
-function runScheduledBackupIfDue() {
+async function runScheduledBackupIfDue() {
   const now = new Date();
   const dayFolder = path.join(BACKUPS_DIR, dateStamp(now));
   const hourLabel = String(now.getHours()).padStart(2, "0");
-  const filePath = path.join(dayFolder, `backup-${hourLabel}00.json.gz`);
+  const filePath = path.join(dayFolder, `backup-${hourLabel}00.db.gz`);
   if (fs.existsSync(filePath)) return; // this hour's snapshot already exists - nothing to do until the next one
 
   try {
     fs.mkdirSync(dayFolder, { recursive: true });
-    const gz = zlib.gzipSync(Buffer.from(JSON.stringify(buildBackupPayload()), "utf8"));
+    const gz = zlib.gzipSync(await getDbSnapshotBuffer());
     fs.writeFileSync(filePath, gz);
     logEvent("info", "Scheduled local backup created", { file: filePath, sizeBytes: gz.length });
   } catch (e) {
@@ -4465,107 +4440,27 @@ function cleanupOldLogs() {
 }
 
 // ---------------------------------------------------------------------------
-// ORDER HISTORY COMPACTION - orders.json otherwise grows forever, which
-// means every backup grows forever too. Once a day, any order older than
-// ORDER_COMPACTION_DAYS gets its full detail (line items, customizations,
-// notes) moved into a yearly archive file (ARCHIVES_DIR/orders-<YEAR>.json)
-// and replaced in orders.json with a compact summary - everything a
-// financial report/tax record actually needs (totals, tax breakdown,
-// payment method, customer info), just not the item-level detail. Nothing
-// is destroyed, only relocated - opening an archived order's detail still
-// works (see GET /api/orders/:id/full below), it just isn't part of the
-// routine automatic/encrypted backups by default (see
-// buildBackupPayload()'s includeArchives option).
+// ORDER HISTORY - orders.json used to grow forever, which meant every JSON-
+// blob backup grew forever too, so orders past ORDER_COMPACTION_DAYS were
+// physically moved out into yearly archive files (ARCHIVES_DIR/orders-
+// <YEAR>.json) to keep it in check. That problem doesn't exist once orders
+// live in a SQLite table (indexed queries don't care how many old rows sit
+// alongside the ones you're actually reading) - active compaction has been
+// removed, so every order the app has ever recorded now just stays in the
+// live `orders` table.
 //
-// items is kept as [] on a compacted summary - never omitted or null -
-// because a good dozen call sites elsewhere in this file (kitchen status,
-// KPI best-sellers, coupon usage, billing group merges...) assume
-// order.items is always a real array. An empty array keeps every one of
-// those working exactly as before (.every() on empty is vacuously true,
-// .forEach()/.map() are no-ops, .length is 0) instead of needing to audit
-// and defensively patch each call site individually.
+// findFullOrder() is kept exactly as-is (unchanged, not just uncompacted)
+// purely so any order archived by an older version of this app - on an
+// install that's been upgraded, not a fresh one - can still be opened via
+// GET /api/orders/:id/full: those legacy archive files aren't migrated into
+// SQLite, just left where they are and still read on demand.
 // ---------------------------------------------------------------------------
 
-function compactOrderForArchive(order) {
-  return {
-    id: order.id,
-    orderNumber: order.orderNumber,
-    createdAt: order.createdAt,
-    storeId: order.storeId ?? null,
-    customerName: order.customerName ?? null,
-    customerPhone: order.customerPhone ?? null,
-    total: order.total,
-    subtotal: order.subtotal,
-    cgst: order.cgst,
-    sgst: order.sgst,
-    serviceCharge: order.serviceCharge,
-    discountAmount: order.discountAmount,
-    paymentMethod: order.paymentMethod,
-    isPaid: order.isPaid,
-    orderType: order.orderType,
-    items: [],
-    itemCount: Array.isArray(order.items) ? order.items.length : 0,
-    archived: true
-  };
-}
-
-function compactOldOrders() {
-  const orders = readJson(ORDERS_FILE, []);
-  const cutoffMs = Date.now() - ORDER_COMPACTION_DAYS * 86400000;
-  const byYear = {};
-  let anyChanged = false;
-
-  const nextOrders = orders.map((order) => {
-    if (order.archived) return order; // already compacted in an earlier run
-    const createdAtMs = new Date(order.createdAt).getTime();
-    if (!Number.isFinite(createdAtMs) || createdAtMs >= cutoffMs) return order;
-    const year = new Date(order.createdAt).getFullYear();
-    (byYear[year] = byYear[year] || []).push(order);
-    anyChanged = true;
-    return compactOrderForArchive(order);
-  });
-
-  if (!anyChanged) return;
-
-  for (const [year, yearOrders] of Object.entries(byYear)) {
-    const archiveFile = path.join(ARCHIVES_DIR, `orders-${year}.json`);
-    const existing = readJsonFile(archiveFile, []);
-    writeJsonFile(archiveFile, existing.concat(yearOrders));
-  }
-  writeJson(ORDERS_FILE, nextOrders);
-  logEvent("info", "Compacted old orders into yearly archives", {
-    archivedCount: Object.values(byYear).reduce((sum, arr) => sum + arr.length, 0),
-    years: Object.keys(byYear)
-  });
-}
-
-// Compaction is a once-a-day job, not hourly like the backup/log checks
-// above - a marker file (rather than re-deriving "did I already run today"
-// from order data on every 5-minute tick) is the cheap way to know.
-const COMPACTION_MARKER_FILE = path.join(DATA_DIR, ".last-compaction");
-
-function runCompactionIfDue() {
-  const today = dateStamp(new Date());
-  let lastRun = null;
-  try {
-    lastRun = fs.readFileSync(COMPACTION_MARKER_FILE, "utf8").trim();
-  } catch (e) {
-    // No marker yet - first run ever.
-  }
-  if (lastRun === today) return;
-  try {
-    compactOldOrders();
-  } catch (e) {
-    logEvent("error", "Order compaction failed", { message: e.message });
-  }
-  fs.writeFileSync(COMPACTION_MARKER_FILE, today);
-}
-
-/** Full detail for one order, whether or not it's been compacted - looks
- *  it up in the appropriate year's archive file when the live record says
- *  archived:true, otherwise it's just the live record itself. Shared by
- *  the order-detail route below and anywhere else that needs one order's
- *  real item list regardless of its compaction state. */
+/** Full detail for one order - the live SQLite record, unless it was
+ *  archived by an older version of this app before active compaction was
+ *  removed, in which case it's looked up in that legacy yearly archive file
+ *  instead. Shared by the order-detail route below and anywhere else that
+ *  needs one order's real item list. */
 function findFullOrder(id) {
   const orders = readJson(ORDERS_FILE, []);
   const order = orders.find((o) => o.id === id);
@@ -6945,9 +6840,11 @@ const MIME = {
 // only files anyone unauthenticated should ever be able to fetch by path.
 const STATIC_ROOTS = [
   { prefix: "/css/", dir: path.join(ROOT_DIR, "css") },
-  { prefix: "/js/", dir: path.join(ROOT_DIR, "js") },
-  { prefix: "/uploads/", dir: UPLOADS_DIR }
+  { prefix: "/js/", dir: path.join(ROOT_DIR, "js") }
 ];
+// /uploads/* is handled separately below (serveUpload()) - those files live
+// in S3, not on local disk, so they can't go through serveFile()'s plain
+// fs.readFile the way css/js do.
 
 function serveFile(res, filePath) {
   fs.readFile(filePath, (err, data) => {
@@ -6972,9 +6869,43 @@ function serveFile(res, filePath) {
   });
 }
 
-function serveStatic(req, res, pathname) {
+// Streams an uploaded image straight from S3 - keeps the existing
+// `/uploads/<filename>` URL every menu item photo/branding image/etc.
+// already embeds working unchanged, rather than switching every one of
+// those call sites over to a presigned S3 URL. Filenames only ever come
+// from this server's own upload route (crypto.randomBytes hex + a fixed
+// extension), so this same shape check other upload-adjacent code already
+// uses (restore validation) doubles as this route's path-traversal guard -
+// nothing resembling a "../" can ever match it.
+const UPLOAD_FILENAME_RE = /^[a-f0-9]{16}\.(png|jpg|jpeg|gif|webp)$/i;
+async function serveUpload(res, filename) {
+  if (!UPLOAD_FILENAME_RE.test(filename)) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    return res.end("Not found");
+  }
+  try {
+    const { stream, contentType, contentLength } = await s3.getObjectStream(filename);
+    const headers = {
+      "Content-Type": contentType || MIME[path.extname(filename)] || "application/octet-stream",
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "no-cache"
+    };
+    if (contentLength != null) headers["Content-Length"] = contentLength;
+    res.writeHead(200, headers);
+    stream.pipe(res);
+  } catch (e) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not found");
+  }
+}
+
+async function serveStatic(req, res, pathname) {
   if (pathname === "/" || pathname === "/index.html") {
     return serveFile(res, path.join(ROOT_DIR, "index.html"));
+  }
+
+  if (pathname.startsWith("/uploads/")) {
+    return serveUpload(res, pathname.slice("/uploads/".length));
   }
 
   const root = STATIC_ROOTS.find((r) => pathname.startsWith(r.prefix));
@@ -7061,7 +6992,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  serveStatic(req, res, pathname);
+  await serveStatic(req, res, pathname);
 });
 
 // No host given to .listen() below (defaults to all interfaces, not just
@@ -7151,6 +7082,9 @@ route("POST", /^\/api\/stamp-card\/preview\/?$/, async (req, res) => {
 server.listen(PORT, () => {
   console.log(`Seven Bits Coffee server running at http://localhost:${PORT}`);
   logEvent("info", "Server started", { port: PORT });
+  // Dev/test convenience (LocalStack starts with no buckets) - a no-op
+  // either way in production, see ensureBucket()'s own comment.
+  s3.ensureBucket().catch(() => {});
   const lanIPs = getLanIPs();
   if (lanIPs.length > 0) {
     console.log(`Also reachable from other devices on this network at:`);
@@ -7171,10 +7105,4 @@ server.listen(PORT, () => {
   // whether this hour's file already exists on disk instead.
   runScheduledBackupIfDue();
   setInterval(runScheduledBackupIfDue, 5 * 60 * 1000);
-  // Same immediate-then-periodic shape as the backup check above -
-  // runCompactionIfDue() itself is the thing that decides whether today's
-  // compaction has already happened (via COMPACTION_MARKER_FILE), so
-  // calling it this often costs nothing on the days it's a no-op.
-  runCompactionIfDue();
-  setInterval(runCompactionIfDue, 5 * 60 * 1000);
 });

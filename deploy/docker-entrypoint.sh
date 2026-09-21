@@ -1,16 +1,12 @@
 #!/bin/sh
-# Mirrors main.js's seedWritableDirs() for the Electron build: the bundled
-# uploads/ folder (baked into the image at /app/uploads) only ever gets
-# copied into the mounted volume once, on first run - after that the
-# volume is the live copy and the image's own bundled files are never
-# touched again.
+# Uploaded images live in S3 now (see s3.js) - the bundled uploads/ folder
+# baked into this image gets pushed there once, on first run, by
+# scripts/seed-uploads-to-s3.js (the server-mode equivalent of main.js's
+# own seedWritableDirs() for the Electron build).
 set -e
 
 mkdir -p "$SBC_DATA_DIR" "$SBC_LOGS_DIR" "$SBC_BACKUPS_DIR"
 
-if [ -z "$(ls -A "$SBC_UPLOADS_DIR" 2>/dev/null)" ]; then
-    mkdir -p "$SBC_UPLOADS_DIR"
-    cp -n /app/uploads/. "$SBC_UPLOADS_DIR"/ 2>/dev/null || true
-fi
+node scripts/seed-uploads-to-s3.js || true
 
 exec node server.js
