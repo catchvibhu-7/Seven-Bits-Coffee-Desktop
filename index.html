@@ -157,6 +157,12 @@
                 </div>
             </div>
 
+            <!-- "Closed for the day" / "orders paused" notice - populated/
+                 shown only when staff have flipped one of those from Staff
+                 Home (see js/ui/staff-home.js and renderHomeStoreStatusBanner()
+                 in app.js). Empty/hidden otherwise. -->
+            <div id="home-store-status-banner" style="display:none;"></div>
+
             <div id="home-store-facts" class="home-store-facts"></div>
 
             <div class="home-body">

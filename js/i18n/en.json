@@ -185,7 +185,12 @@
         "jumpToCategory": "Jump to category",
         "stampCardTitle": "STAMP CARD",
         "stampCardProgress": "{{count}} of 7 stamps - order today to fill the next one",
-        "stampCardReady": "Free beverage unlocked! Redeem it at checkout."
+        "stampCardReady": "Free beverage unlocked! Redeem it at checkout.",
+        "closedToday": "Closed today",
+        "waitClosed": "Oops! Store closed",
+        "waitPaused": "Orders paused",
+        "closedBannerText": "We're closed for the day - please check back tomorrow.",
+        "pausedBannerFallback": "Orders are paused right now - please try again shortly."
     },
     "menu": {
         "pageTitlePart1": "MENU",

@@ -2252,6 +2252,58 @@ route("PATCH", /^\/api\/stores\/(?<id>\d+)\/?$/, async (req, res, params) => {
   sendJson(res, 200, store);
 });
 
+// Store open/closed/paused status - deliberately a SEPARATE, much more
+// permissive route than the manager+-gated PATCH /api/stores/:id above:
+// any KITCHEN_ROLES staff member (including a plain employee) can flip
+// their own store's status, matching a same-shift operational call rather
+// than a settings change. Scoped by accessibleStoreIds() the same way
+// everything else in the app resolves "which store(s) can this session
+// touch" - a single-store employee/manager only ever has their own
+// session.storeId to pass here anyway.
+function requireStoreStatusAccess(req, res, storeId) {
+  const session = requireRole(req, res, KITCHEN_ROLES);
+  if (!session) return null;
+  const allowed = accessibleStoreIds(session);
+  if (allowed !== null && !allowed.includes(storeId)) {
+    sendJson(res, 403, { error: "You don't have access to that store" });
+    return null;
+  }
+  return session;
+}
+
+route("GET", /^\/api\/stores\/(?<id>\d+)\/status\/?$/, async (req, res, params) => {
+  const storeId = Number(params.id);
+  if (!requireStoreStatusAccess(req, res, storeId)) return;
+  const store = readJson(STORES_FILE, []).find((s) => s.id === storeId);
+  if (!store) return sendJson(res, 404, { error: "Store not found" });
+  const ops = store.operations || DEFAULT_STORE_OPERATIONS;
+  sendJson(res, 200, { closedForDay: !!ops.closedForDay, pausedOrders: ops.pausedOrders || DEFAULT_STORE_OPERATIONS.pausedOrders });
+});
+
+route("PATCH", /^\/api\/stores\/(?<id>\d+)\/status\/?$/, async (req, res, params) => {
+  const storeId = Number(params.id);
+  const session = requireStoreStatusAccess(req, res, storeId);
+  if (!session) return;
+  const stores = readJson(STORES_FILE, []);
+  const store = stores.find((s) => s.id === storeId);
+  if (!store) return sendJson(res, 404, { error: "Store not found" });
+  const body = await readBody(req);
+  const existingOps = store.operations || DEFAULT_STORE_OPERATIONS;
+  store.operations = {
+    ...existingOps,
+    closedForDay: "closedForDay" in body ? Boolean(body.closedForDay) : !!existingOps.closedForDay,
+    pausedOrders: body.pausedOrders !== undefined ? sanitizePausedOrders(body.pausedOrders, existingOps.pausedOrders) : existingOps.pausedOrders || DEFAULT_STORE_OPERATIONS.pausedOrders
+  };
+  writeJson(STORES_FILE, stores);
+  logEvent("info", "Store status changed", {
+    storeId,
+    closedForDay: store.operations.closedForDay,
+    paused: store.operations.pausedOrders.enabled,
+    by: session.name
+  });
+  sendJson(res, 200, { closedForDay: store.operations.closedForDay, pausedOrders: store.operations.pausedOrders });
+});
+
 /** Closing a store, owner-only (same tier as opening one). Its employees/
  *  managers can't be left pointing at a store that no longer exists, so
  *  the caller must say what happens to them: reassign everyone to another
@@ -2899,6 +2951,21 @@ route("GET", /^\/api\/menu\/?$/, async (req, res, params, url) => {
   sendJson(res, 200, { ...menu, items });
 });
 
+/** A single-store deployment's customer/guest never actually picks a store
+ *  (the client's own store picker only ever shows once there's more than
+ *  one - see StoreSystem.hasMultipleStores() in store-logic.js), so
+ *  ?storeId= is never sent and every store-scoped setting (delivery,
+ *  waitTime, tableCount, arcade, and now closedForDay/pausedOrders) would
+ *  otherwise silently never apply to a real customer despite being
+ *  configured on that one store's own Operations tab. Unambiguous fallback:
+ *  with exactly one store in the whole system, that's obviously the one
+ *  every unscoped customer/guest request means. */
+function resolveSingleStoreFallback(effectiveStoreId) {
+  if (effectiveStoreId != null) return effectiveStoreId;
+  const stores = readJson(STORES_FILE, []);
+  return stores.length === 1 ? stores[0].id : null;
+}
+
 /** Resolves the same "?storeId= only for a customer/guest, session storeId
  *  otherwise" rule /api/menu's handler above uses - kept in sync with it
  *  rather than re-derived per caller. */
@@ -2910,14 +2977,28 @@ function resolveEffectiveStoreId(req, url) {
     const requestedStoreId = Number(url.searchParams.get("storeId"));
     if (Number.isFinite(requestedStoreId)) effectiveStoreId = requestedStoreId;
   }
-  return effectiveStoreId;
+  return resolveSingleStoreFallback(effectiveStoreId);
+}
+
+/** Store open/paused status alongside a wait-time reading - both routes
+ *  below call this so Home page's per-render wait-time fetch also carries
+ *  fresh closedForDay/pausedOrders (this endpoint is public and already
+ *  fetched fresh on every Home render, unlike siteConfig which only
+ *  refreshes on store switch/reload - piggybacking here means a status
+ *  change shows up next time a visitor's Home page re-renders instead of
+ *  needing a hard refresh). */
+function storeStatusFields(storeId) {
+  const store = readJson(STORES_FILE, []).find((s) => s.id === storeId);
+  const ops = (store && store.operations) || DEFAULT_STORE_OPERATIONS;
+  return { closedForDay: !!ops.closedForDay, pausedOrders: ops.pausedOrders || DEFAULT_STORE_OPERATIONS.pausedOrders };
 }
 
 // Ambient "how long right now" reading - no specific cart in mind (Home page,
 // Menu page while just browsing).
 route("GET", /^\/api\/wait-time\/?$/, async (req, res, params, url) => {
-  const waitMins = computeWaitTimeMins([], resolveEffectiveStoreId(req, url));
-  sendJson(res, 200, { waitMins });
+  const storeId = resolveEffectiveStoreId(req, url);
+  const waitMins = computeWaitTimeMins([], storeId);
+  sendJson(res, 200, { waitMins, ...storeStatusFields(storeId) });
 });
 
 // Cart-aware reading (checkout) - body items are the same {id, quantity}
@@ -2925,8 +3006,9 @@ route("GET", /^\/api\/wait-time\/?$/, async (req, res, params, url) => {
 route("POST", /^\/api\/wait-time\/?$/, async (req, res, params, url) => {
   const body = await readBody(req);
   const items = Array.isArray(body.items) ? body.items : [];
-  const waitMins = computeWaitTimeMins(items, resolveEffectiveStoreId(req, url));
-  sendJson(res, 200, { waitMins });
+  const storeId = resolveEffectiveStoreId(req, url);
+  const waitMins = computeWaitTimeMins(items, storeId);
+  sendJson(res, 200, { waitMins, ...storeStatusFields(storeId) });
 });
 
 route("POST", /^\/api\/menu\/sections\/?$/, async (req, res) => {
@@ -3307,8 +3389,40 @@ const DEFAULT_STORE_OPERATIONS = {
   tableCount: 10,
   arcade: { enabled: true, sessionHours: 2 },
   waitTime: { enabled: true, minMins: 5 },
-  delivery: { enabled: true, lockedBy: null, message: { preset: null, customText: "" } }
+  delivery: { enabled: true, lockedBy: null, message: { preset: null, customText: "" } },
+  // closedForDay ("we're done for today") and pausedOrders ("stop taking
+  // orders for a bit, we're overloaded") are deliberately separate from
+  // delivery's enable flag above - any KITCHEN_ROLES staff member can flip
+  // either (see PATCH /api/stores/:id/status), no Global-Admin lock like
+  // delivery has, since this is a same-day operational call any staff on
+  // shift needs to be able to make without waiting on someone else.
+  closedForDay: false,
+  pausedOrders: { enabled: false, preset: null, customText: "" }
 };
+
+// Same two fixed reasons a customer sees on the paused-orders banner
+// (Home page) - the exact wording lives here once; app.js's own copy of
+// this dict (PAUSED_ORDERS_MESSAGE_PRESETS) resolves the same preset key
+// to the same text, matching how DELIVERY_MESSAGE_PRESETS/
+// DELIVERY_MESSAGE_PRESET_LABELS already split server validation from
+// client display text for the delivery ticker above.
+const PAUSED_ORDERS_MESSAGE_PRESETS = {
+  traffic: "Looks like we have heavy traffic at the store, will resume ordering in some time.",
+  snag: "Oops! We hit some snag, we will resume orders in some time."
+};
+
+/** Merges a pausedOrders patch onto the existing value - unlike
+ *  sanitizeDelivery, there's no lock tier here (see DEFAULT_STORE_
+ *  OPERATIONS' comment on closedForDay/pausedOrders) so this is a plain
+ *  "whichever fields were sent replace the old ones" merge. */
+function sanitizePausedOrders(raw, existing) {
+  const current = existing || DEFAULT_STORE_OPERATIONS.pausedOrders;
+  const input = raw && typeof raw === "object" ? raw : {};
+  const enabled = "enabled" in input ? Boolean(input.enabled) : current.enabled;
+  const preset = "preset" in input ? (typeof input.preset === "string" && PAUSED_ORDERS_MESSAGE_PRESETS[input.preset] ? input.preset : null) : current.preset;
+  const customText = "customText" in input ? (typeof input.customText === "string" ? input.customText.trim().slice(0, 200) : "") : current.customText;
+  return { enabled, preset, customText };
+}
 
 // Which "Find us" fields show on a store's own home page - every field
 // visible by default so an existing store with no configuration looks
@@ -3364,6 +3478,8 @@ function mergeStoreOverrides(config, store) {
     arcade: operations.arcade || DEFAULT_STORE_OPERATIONS.arcade,
     waitTime: operations.waitTime || DEFAULT_STORE_OPERATIONS.waitTime,
     delivery: operations.delivery || DEFAULT_STORE_OPERATIONS.delivery,
+    closedForDay: !!operations.closedForDay,
+    pausedOrders: operations.pausedOrders || DEFAULT_STORE_OPERATIONS.pausedOrders,
     homePicks: store && store.homePicks !== undefined ? store.homePicks : config.homePicks,
     // A store's own single hero photo (see PATCH /api/stores/:id) - cycled
     // in alongside the franchise-wide heroImages array (see
@@ -3457,7 +3573,7 @@ function computeWaitTimeMins(cartItems, storeId) {
 // all, it just receives whatever's already effective.
 function configForSession(session, explicitStoreId = null) {
   const config = readJson(CONFIG_FILE, {});
-  const storeId = session && session.storeId != null ? session.storeId : explicitStoreId;
+  const storeId = resolveSingleStoreFallback(session && session.storeId != null ? session.storeId : explicitStoreId);
   if (storeId == null) return config;
   const store = readJson(STORES_FILE, []).find((s) => s.id === storeId);
   return mergeStoreOverrides(config, store);
@@ -4839,6 +4955,25 @@ route("POST", /^\/api\/orders\/?$/, async (req, res) => {
   if (effectiveStoreId == null && body.storeId != null) {
     const requestedStoreId = Number(body.storeId);
     if (allStores.some((s) => s.id === requestedStoreId)) effectiveStoreId = requestedStoreId;
+  }
+  effectiveStoreId = resolveSingleStoreFallback(effectiveStoreId);
+
+  // A customer/guest can't place a NEW order while the store is closed for
+  // the day or has orders paused (heavy traffic/a snag) - staff placing a
+  // counter order on someone's behalf can still bypass this (they're
+  // physically there and know better than a blanket flag). Checked before
+  // computeOrder runs for the same reason the delivery guardrails below
+  // are - a doomed order shouldn't get priced out for nothing.
+  if (!KITCHEN_ROLES.includes(session.role)) {
+    const orderingStore = allStores.find((s) => s.id === effectiveStoreId);
+    const ops = (orderingStore && orderingStore.operations) || DEFAULT_STORE_OPERATIONS;
+    if (ops.closedForDay) {
+      return sendJson(res, 400, { error: "This store is closed for the day - please check back tomorrow." });
+    }
+    if (ops.pausedOrders && ops.pausedOrders.enabled) {
+      const pausedText = ops.pausedOrders.customText || (ops.pausedOrders.preset && PAUSED_ORDERS_MESSAGE_PRESETS[ops.pausedOrders.preset]) || "Orders are paused right now - please try again shortly.";
+      return sendJson(res, 400, { error: pausedText });
+    }
   }
 
   // Delivery has real-world guardrails a customer choosing takeaway/dine-in

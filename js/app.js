@@ -82,15 +82,25 @@ async function loadCombos() {
  *  Home page fact strip, the Menu page header, and the post-checkout
  *  confirmation screen so they always agree with each other. */
 async function fetchCurrentWaitMins() {
+    const status = await fetchStoreOperationalStatus();
+    return status.waitMins;
+}
+
+/** Same ambient GET /api/wait-time reading as fetchCurrentWaitMins(), but
+ *  returns the whole response - this endpoint is already fetched fresh on
+ *  every Home page render, so it doubles as the freshest read of
+ *  closedForDay/pausedOrders available (unlike siteConfig, which only
+ *  refreshes on store switch/reload - see storeStatusFields() server-side). */
+async function fetchStoreOperationalStatus() {
     const storeId = TRACKING_ROLES.includes(session.role) || !session.authenticated ? StoreSystem.getSelectedStoreId() : null;
     const url = storeId != null ? `/api/wait-time?storeId=${encodeURIComponent(storeId)}` : "/api/wait-time";
     try {
         const res = await fetch(url);
-        if (!res.ok) return null;
+        if (!res.ok) return { waitMins: null, closedForDay: false, pausedOrders: { enabled: false, preset: null, customText: "" } };
         const data = await res.json();
-        return data.waitMins ?? null;
+        return { waitMins: data.waitMins ?? null, closedForDay: !!data.closedForDay, pausedOrders: data.pausedOrders || { enabled: false, preset: null, customText: "" } };
     } catch (e) {
-        return null;
+        return { waitMins: null, closedForDay: false, pausedOrders: { enabled: false, preset: null, customText: "" } };
     }
 }
 
@@ -2840,6 +2850,35 @@ function renderHomeDeliveryTicker() {
     root.innerHTML = `<span class="home-delivery-ticker-track">${escapeHtml(message)} &nbsp;&nbsp;&nbsp;&nbsp; ${escapeHtml(message)}</span>`;
 }
 
+// Mirrors PAUSED_ORDERS_MESSAGE_PRESETS in server.js - same manual-sync
+// tradeoff as DELIVERY_MESSAGE_PRESET_LABELS above.
+const PAUSED_ORDERS_MESSAGE_PRESET_LABELS = {
+    traffic: "Looks like we have heavy traffic at the store, will resume ordering in some time.",
+    snag: "Oops! We hit some snag, we will resume orders in some time."
+};
+
+/** Static (non-scrolling, unlike the delivery ticker) banner for the two
+ *  store-wide stop-taking-orders states a staff member can flip from Staff
+ *  Home (see js/ui/staff-home.js) - closedForDay wins if somehow both are
+ *  set at once, since "closed for the day" is the stronger claim. Called
+ *  from renderHomeStoreFacts() right after it fetches the same status this
+ *  needs, rather than a second fetch. */
+function renderHomeStoreStatusBanner(closedForDay, pausedOrders) {
+    const root = document.getElementById("home-store-status-banner");
+    if (!root) return;
+    if (!closedForDay && !pausedOrders?.enabled) {
+        root.style.display = "none";
+        root.innerHTML = "";
+        return;
+    }
+    const message = closedForDay
+        ? t("home.closedBannerText")
+        : pausedOrders.customText || (pausedOrders.preset && PAUSED_ORDERS_MESSAGE_PRESET_LABELS[pausedOrders.preset]) || t("home.pausedBannerFallback");
+    root.style.display = "block";
+    root.className = "home-store-status-banner";
+    root.textContent = message;
+}
+
 /**
  * 7-day stamp card widget - one stamp per calendar day ordered (tracked by
  * phone number server-side, see GET /api/stamp-card), 7 stamps unlocks a
@@ -2909,15 +2948,25 @@ async function renderHomeStoreFacts() {
         stats = null;
     }
 
-    const waitMins = await fetchCurrentWaitMins();
+    const status = await fetchStoreOperationalStatus();
+    const { waitMins, closedForDay, pausedOrders } = status;
+    renderHomeStoreStatusBanner(closedForDay, pausedOrders);
 
     const facts = [
-        { label: t("home.openToday"), value: siteConfig.footer?.hours || t("home.seeHoursBelow"), color: "var(--color-success)" },
+        {
+            label: t("home.openToday"),
+            value: closedForDay ? t("home.closedToday") : siteConfig.footer?.hours || t("home.seeHoursBelow"),
+            color: closedForDay ? "var(--color-danger)" : "var(--color-success)"
+        },
         { label: t("home.address"), value: siteConfig.footer?.address || "-", color: "var(--color-text)" },
         { label: t("home.ordersToday"), value: stats ? String(stats.ordersToday) : "-", color: "var(--color-text)" },
         { label: t("home.bitsBrewedToday"), value: stats ? String(stats.itemsServedToday) : "-", color: "var(--color-accent)" }
     ];
-    if (waitMins != null) {
+    if (closedForDay) {
+        facts.push({ label: t("home.currentWait"), value: t("home.waitClosed"), color: "var(--color-danger)" });
+    } else if (pausedOrders.enabled) {
+        facts.push({ label: t("home.currentWait"), value: t("home.waitPaused"), color: "var(--color-danger)" });
+    } else if (waitMins != null) {
         facts.push({ label: t("home.currentWait"), value: `~${waitMins} ${waitMins === 1 ? t("checkout.unitMin") : t("checkout.unitMins")}`, color: "var(--color-accent)" });
     }
     root.innerHTML = facts

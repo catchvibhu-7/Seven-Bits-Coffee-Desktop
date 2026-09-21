@@ -185,7 +185,12 @@
         "jumpToCategory": "श्रेणी पर जाएं",
         "stampCardTitle": "स्टैंप कार्ड",
         "stampCardProgress": "7 में से {{count}} स्टैंप - अगला स्टैंप पाने के लिए आज ऑर्डर करें",
-        "stampCardReady": "मुफ़्त पेय अनलॉक हुआ! चेकआउट पर रिडीम करें।"
+        "stampCardReady": "मुफ़्त पेय अनलॉक हुआ! चेकआउट पर रिडीम करें।",
+        "closedToday": "आज बंद है",
+        "waitClosed": "क्षमा करें! दुकान बंद है",
+        "waitPaused": "ऑर्डर रुके हुए हैं",
+        "closedBannerText": "आज के लिए बंद है - कृपया कल फिर से देखें।",
+        "pausedBannerFallback": "अभी ऑर्डर रुके हुए हैं - कृपया थोड़ी देर बाद पुनः प्रयास करें।"
     },
     "menu": {
         "pageTitlePart1": "मेन्यू",

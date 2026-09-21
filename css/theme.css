@@ -2636,6 +2636,20 @@ input[type="checkbox"]:disabled {
         white-space: normal;
     }
 }
+/* "Closed for the day" / "orders paused" notice (see
+   renderHomeStoreStatusBanner() in app.js) - static, not a scrolling
+   ticker like delivery's above, since this is the one thing on the page
+   most worth a visitor actually stopping to read in full immediately. */
+.home-store-status-banner {
+    background: var(--color-danger);
+    color: var(--color-bg);
+    text-align: center;
+    font-weight: bold;
+    font-size: 13px;
+    letter-spacing: 0.03em;
+    padding: 12px 20px;
+    margin: 0 -20px;
+}
 /* 7-day stamp card (see renderHomeStampCard() in app.js) - a row of 7
    "stamp" slots plus an 8th reward slot, filled left-to-right as a phone
    number orders on distinct calendar days. Lives in the hero's left column

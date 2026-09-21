@@ -16,8 +16,16 @@
  */
 import { KitchenSystem } from "../features/kitchen-logic.js";
 import { PayrollSystem } from "../features/payroll-logic.js";
+import { StoreSystem } from "../features/store-logic.js";
 import { currencySymbol } from "../features/config-logic.js";
 import { escapeHtml } from "../features/html-utils.js";
+
+// Mirrors PAUSED_ORDERS_MESSAGE_PRESETS in server.js (same manual-sync
+// tradeoff as app.js's own copy, used for the Home page banner).
+const PAUSED_ORDERS_PRESETS = {
+    traffic: "Heavy traffic",
+    snag: "Technical snag"
+};
 
 const LOW_STOCK_THRESHOLD = 5; // matches admin-portal.js's Menu Items low-stock highlight
 
@@ -79,6 +87,27 @@ export async function renderStaffHome(session) {
         .sort((a, b) => a.stockCount - b.stockCount)
         .slice(0, 5);
 
+    // Every KITCHEN_ROLES staff member (not just manager+) can flip their
+    // own store's open/paused status - a single-store employee/manager
+    // already has session.storeId; an owner/multi-store admin has none, so
+    // falls back to whichever store the Kitchen/Billing switcher currently
+    // has picked (same shared value, see store-logic.js), defaulting to
+    // the first store if nothing's been picked yet.
+    let storeId = session?.storeId ?? null;
+    if (storeId == null) {
+        const stores = await PayrollSystem.fetchStores();
+        storeId = StoreSystem.getStaffSelectedStoreId() ?? stores[0]?.id ?? null;
+    }
+    let storeStatus = { closedForDay: false, pausedOrders: { enabled: false, preset: null, customText: "" } };
+    if (storeId != null) {
+        try {
+            const res = await fetch(`/api/stores/${encodeURIComponent(storeId)}/status`, { credentials: "include" });
+            if (res.ok) storeStatus = await res.json();
+        } catch (e) {
+            // Leave the default (open, unpaused) - not worth blocking the rest of this page over.
+        }
+    }
+
     const roleLabel = (session?.role || "").toUpperCase();
     const dateLabel = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" })
         .format(new Date())
@@ -88,6 +117,30 @@ export async function renderStaffHome(session) {
         .slice()
         .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
         .slice(0, 6);
+
+    // Store status card - any staff role can act on this (see PATCH /api/
+    // stores/:id/status, no manager+ gate like most store settings), since
+    // closing/pausing is a same-shift call whoever's on the floor needs to
+    // be able to make. closedForDay wins the label if somehow both are set.
+    const statusLabel = storeStatus.closedForDay
+        ? "CLOSED FOR THE DAY"
+        : storeStatus.pausedOrders.enabled
+          ? `PAUSED – ${storeStatus.pausedOrders.customText || PAUSED_ORDERS_PRESETS[storeStatus.pausedOrders.preset] || "Orders on hold"}`
+          : "OPEN";
+    const statusColor = storeStatus.closedForDay || storeStatus.pausedOrders.enabled ? "var(--color-danger)" : "var(--color-success)";
+    const statusButtonsHtml = storeStatus.closedForDay
+        ? `<button type="button" id="store-status-reopen" class="staff-logout-btn" style="padding:10px 16px; font-size:11px; min-height:40px;">REOPEN STORE</button>`
+        : `
+            ${
+                storeStatus.pausedOrders.enabled
+                    ? `<button type="button" id="store-status-resume" class="staff-logout-btn" style="padding:10px 16px; font-size:11px; min-height:40px;">RESUME ORDERS</button>`
+                    : `
+                <button type="button" id="store-status-pause-traffic" style="padding:10px 14px; font-size:11px; min-height:40px; background:transparent; border:2px solid var(--color-danger); color:var(--color-danger); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Pause – Heavy Traffic</button>
+                <button type="button" id="store-status-pause-snag" style="padding:10px 14px; font-size:11px; min-height:40px; background:transparent; border:2px solid var(--color-danger); color:var(--color-danger); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Pause – Snag</button>
+            `
+            }
+            <button type="button" id="store-status-close" style="padding:10px 16px; font-size:11px; min-height:40px; background:transparent; border:2px solid var(--color-text-muted); color:var(--color-text-muted); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Close For The Day</button>
+        `;
 
     root.innerHTML = `
         <div style="padding:26px 28px 44px; max-width:1600px; margin:0 auto;">
@@ -100,6 +153,19 @@ export async function renderStaffHome(session) {
                 </div>
                 <button type="button" id="staff-home-new-order" class="staff-logout-btn" style="background:var(--color-accent); color:var(--color-accent-contrast); border:2px solid var(--color-accent); padding:14px 24px; font-size:13px; min-height:44px;">[ NEW ORDER ]</button>
             </div>
+
+            ${
+                storeId != null
+                    ? `
+            <div style="margin-top:16px; padding:14px 18px; background:var(--color-surface); border:1px solid ${statusColor}; display:flex; flex-wrap:wrap; align-items:center; gap:14px; justify-content:space-between;">
+                <div style="min-width:0;">
+                    <div style="font-size:10px; letter-spacing:.16em; color:var(--color-text-muted); text-transform:uppercase;">Store status</div>
+                    <div style="font-size:15px; font-weight:bold; letter-spacing:.03em; margin-top:4px; color:${statusColor}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(statusLabel)}</div>
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">${statusButtonsHtml}</div>
+            </div>`
+                    : ""
+            }
 
             <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(212px,1fr)); gap:14px; margin-top:26px;">
                 ${[
@@ -211,6 +277,29 @@ export async function renderStaffHome(session) {
     root.querySelector("#staff-home-new-order")?.addEventListener("click", () => window.showPage("menu"));
     root.querySelector("#staff-home-all-orders")?.addEventListener("click", () => window.showPage("kitchen"));
     root.querySelector("#staff-home-billing")?.addEventListener("click", () => window.showPage("billing"));
+
+    // Store status buttons - PATCH then just re-render this whole page from
+    // scratch (matches how e.g. openStorePicker() re-renders whichever page
+    // is open, rather than hand-patching just the one card).
+    const patchStoreStatus = async (body) => {
+        try {
+            await fetch(`/api/stores/${encodeURIComponent(storeId)}/status`, {
+                method: "PATCH",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+        } catch (e) {
+            // Best-effort - the re-render below will just show whatever the
+            // server's actual current state is either way.
+        }
+        renderStaffHome(session);
+    };
+    root.querySelector("#store-status-close")?.addEventListener("click", () => patchStoreStatus({ closedForDay: true }));
+    root.querySelector("#store-status-reopen")?.addEventListener("click", () => patchStoreStatus({ closedForDay: false }));
+    root.querySelector("#store-status-pause-traffic")?.addEventListener("click", () => patchStoreStatus({ pausedOrders: { enabled: true, preset: "traffic", customText: "" } }));
+    root.querySelector("#store-status-pause-snag")?.addEventListener("click", () => patchStoreStatus({ pausedOrders: { enabled: true, preset: "snag", customText: "" } }));
+    root.querySelector("#store-status-resume")?.addEventListener("click", () => patchStoreStatus({ pausedOrders: { enabled: false } }));
     root.querySelectorAll(".staff-home-copy-url").forEach((btn) => {
         btn.addEventListener("click", async () => {
             try {
