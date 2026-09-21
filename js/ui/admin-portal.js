@@ -1289,6 +1289,12 @@ export const AdminPortal = {
             }
         });
 
+        // Owner reaches this even though canRestore (isGlobalAdmin) is false
+        // for them everywhere else on this tab - the audit log is a
+        // deliberate owner-only exception (see renderAuditLogSection()'s own
+        // comment), so it can't sit after the early return below.
+        if (isOwner) await this.renderAuditLogSection(root);
+
         if (!canRestore) return;
 
         if (demoAvailable) document.getElementById("demo-load").addEventListener("click", () => {
@@ -1418,12 +1424,90 @@ export const AdminPortal = {
         });
     },
 
+    /** Owner-only (GET /api/audit-log itself is gated the same way - "an
+     *  admin being able to read their own trail would defeat the point",
+     *  see server.js). Recent entries only (the log itself is capped at
+     *  1000, this just shows the newest handful without a full history
+     *  UI nobody asked for). Covers store open/close/pause/resume plus the
+     *  pre-existing staff role/password/removal/payroll events - whatever
+     *  logAuditEvent() has been called with. */
+    async renderAuditLogSection(root) {
+        let entries = [];
+        try {
+            const res = await fetch("/api/audit-log", { credentials: "include" });
+            if (res.ok) entries = await res.json();
+        } catch (e) {
+            entries = [];
+        }
+        const ACTION_LABELS = {
+            change_role: "Changed role",
+            reset_password: "Reset password",
+            remove_account: "Removed account",
+            payroll_paid: "Marked payroll paid",
+            store_closed: "Closed store",
+            store_reopened: "Reopened store",
+            orders_paused: "Paused orders",
+            orders_resumed: "Resumed orders"
+        };
+        const describeEntry = (e) => {
+            const parts = [];
+            if (e.targetUsername) parts.push(`for ${e.targetUsername}`);
+            if (e.meta?.storeName) parts.push(`at ${e.meta.storeName}`);
+            if (e.meta?.preset) parts.push(`(${e.meta.preset})`);
+            return parts.join(" ");
+        };
+        root.insertAdjacentHTML(
+            "beforeend",
+            `
+            <div class="config-controls" style="margin-top:20px;">
+                <h3 style="margin-top:0;">AUDIT LOG</h3>
+                <p class="admin-help-text">Who did what to staff accounts, payroll, and store open/close/pause status - visible to the owner only.</p>
+                <table class="admin-table">
+                    <thead><tr><th>WHEN</th><th>WHO</th><th>ACTION</th><th>DETAILS</th></tr></thead>
+                    <tbody>
+                        ${
+                            entries.length === 0
+                                ? `<tr><td colspan="4" style="text-align:center; color:var(--color-text-muted); padding:20px;">No audit events yet.</td></tr>`
+                                : entries
+                                      .slice(0, 50)
+                                      .map(
+                                          (e) => `
+                            <tr>
+                                <td style="font-size:11px; color:var(--color-text-muted); white-space:nowrap;">${escapeHtmlAttr(new Date(e.timestamp).toLocaleString())}</td>
+                                <td>${escapeHtmlAttr(e.actorName)} <span style="color:var(--color-text-muted); font-size:10px;">(${escapeHtmlAttr(e.actorRole)})</span></td>
+                                <td>${escapeHtmlAttr(ACTION_LABELS[e.action] || e.action)}</td>
+                                <td style="color:var(--color-text-muted); font-size:11px;">${escapeHtmlAttr(describeEntry(e))}</td>
+                            </tr>
+                        `
+                                      )
+                                      .join("")
+                        }
+                    </tbody>
+                </table>
+            </div>
+        `
+        );
+    },
+
     // ---------------------------------------------------------------- REPORTS & EXPORT
+    /** YYYY-MM-DD in LOCAL time (not toISOString, which is UTC and can land
+     *  on the wrong day for anyone west of UTC) - used by every quick-range
+     *  preset button below to fill the same from/to inputs manual entry uses. */
+    dateInputValue(d) {
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    },
+
     async renderReportsExport(root) {
         root.innerHTML = `
             <div class="config-controls">
                 <h3 style="margin-top:0;">EXPORT ORDERS (CSV)</h3>
-                <p class="admin-help-text">Downloads a spreadsheet-ready CSV of orders for bookkeeping/tax filing - one row per order with items, tax, and totals.</p>
+                <p class="admin-help-text">Downloads a spreadsheet-ready CSV of orders for bookkeeping/tax filing - one row per order with items, tax, and totals, plus a totals row at the bottom.</p>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                    <button type="button" class="admin-btn" data-range="today">TODAY</button>
+                    <button type="button" class="admin-btn" data-range="week">THIS WEEK</button>
+                    <button type="button" class="admin-btn" data-range="month">THIS MONTH</button>
+                    <button type="button" class="admin-btn" data-range="year">THIS YEAR</button>
+                </div>
                 <div style="display:flex; gap:12px; margin-bottom:14px;">
                     <div class="control-group" style="flex:0 0 150px;">
                         <label for="report-from">FROM (optional)</label>
@@ -1437,7 +1521,50 @@ export const AdminPortal = {
                 <button class="admin-btn-primary" id="report-export-csv">EXPORT CSV</button>
                 <p id="report-error" role="alert" aria-live="polite" style="color:var(--color-danger); font-size:11px; min-height:12px; margin-top:10px;"></p>
             </div>
+
+            <div class="config-controls" style="margin-top:20px;">
+                <h3 style="margin-top:0;">EXPORT STAFF EXPENSES (CSV)</h3>
+                <p class="admin-help-text">Downloads actual paid-out payroll (from Payroll &gt; Mark Paid), grouped by staff and by calendar month or year - for labor-cost tracking/tax filing. Only real payouts count, not the current unpaid period.</p>
+                <div style="display:flex; gap:12px; align-items:flex-end; margin-bottom:14px; flex-wrap:wrap;">
+                    <div class="control-group" style="flex:0 0 150px;">
+                        <label for="expense-group-by">GROUP BY</label>
+                        <select id="expense-group-by">
+                            <option value="month">Month</option>
+                            <option value="year">Year</option>
+                        </select>
+                    </div>
+                    <div class="control-group" style="flex:0 0 150px;">
+                        <label for="expense-from">FROM (optional)</label>
+                        <input type="date" id="expense-from" />
+                    </div>
+                    <div class="control-group" style="flex:0 0 150px;">
+                        <label for="expense-to">TO (optional)</label>
+                        <input type="date" id="expense-to" />
+                    </div>
+                </div>
+                <button class="admin-btn-primary" id="expense-export-csv">EXPORT CSV</button>
+                <p id="expense-error" role="alert" aria-live="polite" style="color:var(--color-danger); font-size:11px; min-height:12px; margin-top:10px;"></p>
+            </div>
         `;
+
+        root.querySelectorAll("[data-range]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const now = new Date();
+                let from = new Date(now);
+                if (btn.dataset.range === "week") {
+                    // Monday-start week, matching computePayPeriod()'s own
+                    // weekly-staff convention elsewhere in this app.
+                    const day = (now.getDay() + 6) % 7;
+                    from.setDate(now.getDate() - day);
+                } else if (btn.dataset.range === "month") {
+                    from = new Date(now.getFullYear(), now.getMonth(), 1);
+                } else if (btn.dataset.range === "year") {
+                    from = new Date(now.getFullYear(), 0, 1);
+                }
+                document.getElementById("report-from").value = this.dateInputValue(from);
+                document.getElementById("report-to").value = this.dateInputValue(now);
+            });
+        });
 
         document.getElementById("report-export-csv").addEventListener("click", async () => {
             const errorEl = document.getElementById("report-error");
@@ -1459,22 +1586,31 @@ export const AdminPortal = {
 
                 const csvCell = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
                 const header = ["Order #", "Date", "Method", "Customer Phone", "Items", "Subtotal", "CGST", "SGST", "Service Charge", "Tip", "Discount", "Total", "Paid"];
-                const rows = orders.map((o) => [
-                    o.orderNumber || o.id,
-                    new Date(o.createdAt).toLocaleString(),
-                    o.method || "",
-                    o.customerPhone || "",
-                    o.items.map((i) => `${i.quantity}x ${i.name}`).join("; "),
-                    (o.subtotal || 0).toFixed(2),
-                    (o.cgst || 0).toFixed(2),
-                    (o.sgst || 0).toFixed(2),
-                    (o.serviceCharge || 0).toFixed(2),
-                    (o.tipAmount || 0).toFixed(2),
-                    (o.discountAmount || 0).toFixed(2),
-                    (o.total || 0).toFixed(2),
-                    o.isPaid ? "Yes" : "No"
-                ]);
-                const csv = [header, ...rows].map((r) => r.map(csvCell).join(",")).join("\r\n");
+                const numericCols = ["subtotal", "cgst", "sgst", "serviceCharge", "tipAmount", "discountAmount", "total"];
+                const totals = Object.fromEntries(numericCols.map((k) => [k, 0]));
+                const rows = orders.map((o) => {
+                    numericCols.forEach((k) => (totals[k] += o[k] || 0));
+                    return [
+                        o.orderNumber || o.id,
+                        new Date(o.createdAt).toLocaleString(),
+                        o.method || "",
+                        o.customerPhone || "",
+                        o.items.map((i) => `${i.quantity}x ${i.name}`).join("; "),
+                        (o.subtotal || 0).toFixed(2),
+                        (o.cgst || 0).toFixed(2),
+                        (o.sgst || 0).toFixed(2),
+                        (o.serviceCharge || 0).toFixed(2),
+                        (o.tipAmount || 0).toFixed(2),
+                        (o.discountAmount || 0).toFixed(2),
+                        (o.total || 0).toFixed(2),
+                        o.isPaid ? "Yes" : "No"
+                    ];
+                });
+                // TOTAL row - the one thing a plain "one row per order" export
+                // makes someone re-derive by hand in a spreadsheet otherwise,
+                // and the whole point of this export is tax filing.
+                const totalRow = ["TOTAL", "", "", "", "", ...numericCols.map((k) => totals[k].toFixed(2)), ""];
+                const csv = [header, ...rows, totalRow].map((r) => r.map(csvCell).join(",")).join("\r\n");
 
                 const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
                 const url = URL.createObjectURL(blob);
@@ -1486,6 +1622,65 @@ export const AdminPortal = {
                 a.remove();
                 URL.revokeObjectURL(url);
                 ok(`Exported ${orders.length} order(s)`);
+            } catch (e) {
+                errorEl.textContent = e.message || "Export failed";
+            }
+        });
+
+        document.getElementById("expense-export-csv").addEventListener("click", async () => {
+            const errorEl = document.getElementById("expense-error");
+            errorEl.textContent = "";
+            try {
+                const res = await fetch("/api/payroll/history", { credentials: "include" });
+                if (!res.ok) throw new Error("Could not load payroll history");
+                let records = await res.json();
+
+                const fromVal = document.getElementById("expense-from").value;
+                const toVal = document.getElementById("expense-to").value;
+                if (fromVal) records = records.filter((r) => new Date(r.paidAt) >= new Date(fromVal));
+                if (toVal) records = records.filter((r) => new Date(r.paidAt) <= new Date(toVal + "T23:59:59"));
+
+                if (records.length === 0) {
+                    errorEl.textContent = "No paid-out payroll in that range.";
+                    return;
+                }
+
+                const groupByYear = document.getElementById("expense-group-by").value === "year";
+                // periodBucket groups by when a payout actually happened
+                // (paidAt), NOT periodStart/periodType - a weekly-paid
+                // employee's payouts still need to land in the right
+                // calendar month/year alongside everyone else's for this
+                // report to mean anything as a monthly/yearly total.
+                const groups = new Map();
+                for (const r of records) {
+                    const paidAt = new Date(r.paidAt);
+                    const bucket = groupByYear ? String(paidAt.getFullYear()) : `${paidAt.getFullYear()}-${String(paidAt.getMonth() + 1).padStart(2, "0")}`;
+                    const key = `${r.userId}|${bucket}`;
+                    if (!groups.has(key)) groups.set(key, { name: r.name, bucket, payouts: 0, hours: 0, amount: 0 });
+                    const g = groups.get(key);
+                    g.payouts += 1;
+                    g.hours += r.hoursWorked || 0;
+                    g.amount += r.amountPaid || 0;
+                }
+                const sorted = Array.from(groups.values()).sort((a, b) => a.bucket.localeCompare(b.bucket) || a.name.localeCompare(b.name));
+
+                const csvCell = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+                const header = ["Staff Name", groupByYear ? "Year" : "Month", "Payouts", "Hours Worked", "Amount Paid"];
+                const rows = sorted.map((g) => [g.name, g.bucket, String(g.payouts), g.hours.toFixed(2), g.amount.toFixed(2)]);
+                const grandTotal = sorted.reduce((sum, g) => sum + g.amount, 0);
+                const totalRow = ["TOTAL", "", "", "", grandTotal.toFixed(2)];
+                const csv = [header, ...rows, totalRow].map((r) => r.map(csvCell).join(",")).join("\r\n");
+
+                const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `staff-expenses-${groupByYear ? "yearly" : "monthly"}-${new Date().toISOString().slice(0, 10)}.csv`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                ok(`Exported ${sorted.length} row(s)`);
             } catch (e) {
                 errorEl.textContent = e.message || "Export failed";
             }

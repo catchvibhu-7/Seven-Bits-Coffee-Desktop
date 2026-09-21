@@ -204,7 +204,7 @@ if (!fs.existsSync(USER_PREFERENCES_FILE)) writeJson(USER_PREFERENCES_FILE, {});
  * accounts - the request that prompted this was explicitly "so admin can't
  * abuse it", so only the owner can read this log (see GET /api/audit-log).
  */
-function logAuditEvent(actorSession, action, targetUser) {
+function logAuditEvent(actorSession, action, targetUser, meta = null) {
   const log = readJson(AUDIT_LOG_FILE, []);
   log.push({
     timestamp: new Date().toISOString(),
@@ -213,7 +213,12 @@ function logAuditEvent(actorSession, action, targetUser) {
     actorName: actorSession.name,
     actorRole: actorSession.role,
     targetId: targetUser ? targetUser.id : null,
-    targetUsername: targetUser ? targetUser.username : null
+    targetUsername: targetUser ? targetUser.username : null,
+    // Optional free-form details for an event with no single target USER
+    // (e.g. which store/reason for a store open/close) - every existing
+    // call site passes nothing, so old entries just have meta:null, same
+    // as any entry read before this field existed.
+    meta
   });
   // Keep this bounded - it's an audit trail, not an infinite log.
   writeJson(AUDIT_LOG_FILE, log.slice(-1000));
@@ -2305,6 +2310,8 @@ route("PATCH", /^\/api\/stores\/(?<id>\d+)\/status\/?$/, async (req, res, params
   if (!store) return sendJson(res, 404, { error: "Store not found" });
   const body = await readBody(req);
   const existingOps = store.operations || DEFAULT_STORE_OPERATIONS;
+  const wasClosedForDay = !!existingOps.closedForDay;
+  const wasPaused = !!(existingOps.pausedOrders && existingOps.pausedOrders.enabled);
   store.operations = {
     ...existingOps,
     closedForDay: "closedForDay" in body ? Boolean(body.closedForDay) : !!existingOps.closedForDay,
@@ -2317,6 +2324,24 @@ route("PATCH", /^\/api\/stores\/(?<id>\d+)\/status\/?$/, async (req, res, params
     paused: store.operations.pausedOrders.enabled,
     by: session.name
   });
+  // Real audit trail (owner-readable, see GET /api/audit-log) alongside the
+  // plain diagnostic line above - who opened/closed/paused/resumed THIS
+  // store and when. Only logged on an actual state flip, not every PATCH
+  // (e.g. re-sending the same closedForDay value, or a pausedOrders write
+  // that only changes the preset text while already paused, isn't itself
+  // an open/close/pause/resume event).
+  const isNowClosedForDay = store.operations.closedForDay;
+  const isNowPaused = store.operations.pausedOrders.enabled;
+  if (isNowClosedForDay !== wasClosedForDay) {
+    logAuditEvent(session, isNowClosedForDay ? "store_closed" : "store_reopened", null, { storeId, storeName: store.name });
+  }
+  if (isNowPaused !== wasPaused) {
+    logAuditEvent(session, isNowPaused ? "orders_paused" : "orders_resumed", null, {
+      storeId,
+      storeName: store.name,
+      preset: store.operations.pausedOrders.preset
+    });
+  }
   sendJson(res, 200, { closedForDay: store.operations.closedForDay, pausedOrders: store.operations.pausedOrders });
 });
 
