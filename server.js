@@ -4158,6 +4158,44 @@ route("POST", /^\/api\/admin\/backup\/encrypted\/?$/, async (req, res) => {
   res.end(encrypted);
 });
 
+/** A backup taken before someone deleted their account would otherwise
+ *  resurrect that account's real login credentials the moment it's
+ *  restored, since a whole-file restore has no per-table granularity to
+ *  skip just the users table. Capture who's currently deleted BEFORE
+ *  calling restoreFromBuffer(), then call this AFTER with that same list
+ *  to re-scrub any of them the restored snapshot brought back. Deletion is
+ *  meant to be permanent from the user's perspective, not undoable by
+ *  rolling back to an older snapshot. */
+function rescrubDeletedUsers(previouslyDeleted) {
+  if (!previouslyDeleted.length) return;
+  const restoredUsers = readJson(USERS_FILE, []);
+  let resealed = false;
+  previouslyDeleted.forEach((deletedUser) => {
+    const match = restoredUsers.find((u) => u.id === deletedUser.id || u.username === deletedUser.username);
+    if (match && !match.accountDeleted) {
+      match.name = "Deleted User";
+      match.phone = null;
+      match.salt = crypto.randomBytes(16).toString("hex");
+      match.hash = crypto.randomBytes(64).toString("hex");
+      match.accountDeleted = true;
+      match.deletedAt = deletedUser.deletedAt || new Date().toISOString();
+      resealed = true;
+    }
+  });
+  if (resealed) writeJson(USERS_FILE, restoredUsers);
+
+  const restoredScores = readJson(ARCADE_SCORES_FILE, []);
+  const deletedIds = new Set(previouslyDeleted.map((u) => u.id));
+  let scoresResealed = false;
+  restoredScores.forEach((s) => {
+    if (deletedIds.has(s.customerId) && s.name !== "Deleted User") {
+      s.name = "Deleted User";
+      scoresResealed = true;
+    }
+  });
+  if (scoresResealed) writeJson(ARCADE_SCORES_FILE, restoredScores);
+}
+
 // Same destructive-action gating as the plain restore below (Global Admin
 // only, explicit confirmYes) plus a passphrase that has to actually decrypt
 // something - a wrong passphrase or a corrupted/tampered file fails loudly
@@ -4182,11 +4220,13 @@ route("POST", /^\/api\/admin\/restore\/encrypted\/?$/, async (req, res) => {
   } catch (e) {
     return sendJson(res, 400, { error: "Wrong passphrase, or this isn't a valid backup file" });
   }
+  const previouslyDeleted = readJson(USERS_FILE, []).filter((u) => u.accountDeleted);
   try {
     restoreFromBuffer(snapshot);
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
   }
+  rescrubDeletedUsers(previouslyDeleted);
   logEvent("warn", "Whole-instance restore applied (encrypted backup)", { by: session.name });
   sendJson(res, 200, { ok: true });
 });
@@ -4285,11 +4325,13 @@ route("POST", /^\/api\/admin\/restore\/?$/, async (req, res) => {
   if (!body.confirmYes) {
     return sendJson(res, 400, { error: "Missing confirmation" });
   }
+  const previouslyDeleted = readJson(USERS_FILE, []).filter((u) => u.accountDeleted);
   try {
     restoreFromBuffer(Buffer.from(String(body.dataBase64 || ""), "base64"));
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
   }
+  rescrubDeletedUsers(previouslyDeleted);
   logEvent("warn", "Whole-instance restore applied (plain backup)", { by: session.name });
   sendJson(res, 200, { ok: true });
 });
