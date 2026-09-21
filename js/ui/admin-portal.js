@@ -3959,6 +3959,7 @@ export const AdminPortal = {
                 <div id="content-home-section"></div>
                 <div id="content-footer-section"></div>
                 <div id="content-footer-fields-section"></div>
+                <div id="content-privacy-section" style="margin-top:20px;"></div>
             </div>
         `;
 
@@ -4104,6 +4105,68 @@ export const AdminPortal = {
             "afterbegin",
             `<p class="admin-help-text" style="margin:-4px 0 8px;">Anything else to show on "Find us" - Instagram, WhatsApp, GST number, whatever this shop needs. Add up to 6.</p>`
         );
+
+        this.renderPrivacyPolicySection(document.getElementById("content-privacy-section"));
+    },
+
+    /** Privacy policy editor - a deliberate exception to this whole tab's
+     *  isGlobalAdmin()-only canEdit above: both the owner and a Global Admin
+     *  can write here (see PATCH /api/config/privacy-policy's own comment on
+     *  why), so this section builds its own bespoke block instead of using
+     *  renderReadOnlySection/renderSectionEditModal's shared canEdit gate.
+     *  Also the one content field long enough to want a real textarea +
+     *  "load from a file" shortcut rather than the standard inline-edit-
+     *  modal pattern every other Content field above uses. */
+    renderPrivacyPolicySection(root) {
+        if (!root) return;
+        const canEditPrivacy = this.session.role === "owner" || this.isGlobalAdmin();
+        const text = AdminConfig.settings.privacyPolicy || "";
+        root.innerHTML = `
+            <h3 style="margin-top:0; border-top:1px solid var(--color-border); padding-top:20px;">PRIVACY POLICY</h3>
+            <p class="admin-help-text">Shown to customers from a "Privacy Policy" link in the site footer. Starts with a generic template - replace it with your shop's own before relying on it for anything legal.</p>
+            ${
+                canEditPrivacy
+                    ? `
+            <textarea id="privacy-policy-textarea" rows="14" style="width:100%; box-sizing:border-box; background:var(--color-bg); border:1px solid var(--color-border); color:var(--color-text); padding:10px; font-family:inherit; font-size:12px; line-height:1.6;" maxlength="20000">${escapeHtmlAttr(text)}</textarea>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px;">
+                <label for="privacy-policy-upload" class="admin-btn-secondary" style="cursor:pointer;">LOAD FROM FILE</label>
+                <input type="file" id="privacy-policy-upload" accept=".txt,.md,text/plain" style="display:none;" />
+                <button class="admin-btn-primary" id="privacy-policy-save">SAVE</button>
+            </div>
+            <p id="privacy-policy-error" role="alert" aria-live="polite" style="color:var(--color-danger); font-size:11px; min-height:12px; margin-top:8px;"></p>`
+                    : `<p class="admin-help-text">Only the owner or a Global Admin can edit the privacy policy.</p>`
+            }
+        `;
+        if (!canEditPrivacy) return;
+
+        document.getElementById("privacy-policy-upload").addEventListener("change", async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            document.getElementById("privacy-policy-textarea").value = await file.text();
+        });
+        document.getElementById("privacy-policy-save").addEventListener("click", async () => {
+            const errorEl = document.getElementById("privacy-policy-error");
+            errorEl.textContent = "";
+            const value = document.getElementById("privacy-policy-textarea").value.trim();
+            if (!value) {
+                errorEl.textContent = "Privacy policy text can't be empty.";
+                return;
+            }
+            try {
+                const res = await fetch("/api/config/privacy-policy", {
+                    method: "PATCH",
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ privacyPolicy: value })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || "Could not save privacy policy");
+                AdminConfig.settings.privacyPolicy = data.privacyPolicy;
+                ok("Privacy policy saved");
+            } catch (e) {
+                errorEl.textContent = e.message;
+            }
+        });
     },
 
     /** Full "This week's picks" + roast-story + headings editor, opened from

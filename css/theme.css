@@ -3084,6 +3084,31 @@ body.home-full-width .home-body {
         padding-top: 0;
     }
 }
+/* Always-present legal link row (see renderPrivacyPolicyModal(), app.js) -
+   separate from footer-columns since it shows even when every other footer
+   field is empty (a fresh install with no branding filled in yet still
+   ships a default privacy policy). */
+.site-footer .footer-legal {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px dashed var(--color-border);
+    text-align: center;
+}
+.site-footer .footer-legal-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-decoration: underline;
+    cursor: pointer;
+    font-family: inherit;
+}
+.site-footer .footer-legal-link:hover {
+    color: var(--color-accent);
+}
 
 /* The old single-frame walking-cat animation (.pixel-cat-container /
    .pixel-cat) has been replaced by the fuller pixel-kitty setup in

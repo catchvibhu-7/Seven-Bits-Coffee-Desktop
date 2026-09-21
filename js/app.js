@@ -2714,8 +2714,13 @@ window.renderFooter = (config) => {
     const otherFields = customFields.filter((c) => c.type !== "social" && c.type !== "career");
     const hasAnyDetail = f.address || f.phone || f.email || f.hours || customFields.length > 0;
 
+    // Privacy Policy stays visible even on an otherwise-empty footer (no
+    // tagline/address/etc. set) - it's always readable (config.privacyPolicy
+    // is seeded with a default template, see server.js), so there's no
+    // "nothing to show" state for it the way there is for the rest of the footer.
     if (!hasAnyDetail && !f.tagline) {
-        root.innerHTML = "";
+        root.innerHTML = `<div class="footer-inner"><div class="footer-legal"><button type="button" id="footer-privacy-link" class="footer-legal-link">Privacy Policy</button></div></div>`;
+        root.querySelector("#footer-privacy-link")?.addEventListener("click", () => openPrivacyPolicyModal());
         return;
     }
 
@@ -2752,9 +2757,29 @@ window.renderFooter = (config) => {
                     .map((c) => `<div><div class="footer-col-title">${escapeHtml(c.label)}</div><div class="footer-line">${footerFieldValueHtml(c)}</div></div>`)
                     .join("")}
             </div>
+            <div class="footer-legal">
+                <button type="button" id="footer-privacy-link" class="footer-legal-link">Privacy Policy</button>
+            </div>
         </div>
     `;
+    root.querySelector("#footer-privacy-link")?.addEventListener("click", () => openPrivacyPolicyModal());
 };
+
+/** Fetches the latest privacy policy text fresh (rather than trusting a
+ *  possibly-stale cached siteConfig, same reasoning as the store-status
+ *  banner above) and shows it in a themed modal - see
+ *  js/ui/privacy-policy-modal.js. */
+async function openPrivacyPolicyModal() {
+    let text = siteConfig?.privacyPolicy || "";
+    try {
+        const res = await fetch("/api/config");
+        if (res.ok) text = (await res.json()).privacyPolicy || text;
+    } catch (e) {
+        // Fall back to whatever siteConfig already has.
+    }
+    const mod = await import("./ui/privacy-policy-modal.js");
+    mod.renderPrivacyPolicyModal(text || "No privacy policy has been set up yet.");
+}
 
 /**
  * Home page "This week's picks" - a handful of featured items so there's

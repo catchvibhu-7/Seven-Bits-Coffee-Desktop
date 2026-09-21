@@ -224,6 +224,21 @@ if (!fs.existsSync(MENU_FILE)) {
   writeJson(MENU_FILE, seed);
 }
 
+// Seeded default for config.privacyPolicy (see PATCH /api/config/privacy-
+// policy) - shown in the customer-facing footer modal (renderPrivacyPolicyModal(),
+// app.js) until an owner/Global Admin replaces it with something specific
+// to this shop. A generic starting point, not legal advice - same framing
+// as this app's own TERMS_AND_PRIVACY.txt (installer license page).
+const DEFAULT_PRIVACY_POLICY = `PRIVACY POLICY (generic template - replace with your own before relying on it)
+
+We collect only what's needed to take and fulfil your order: your name and phone number, order details, and - if you use delivery - your address. If you pay online, your payment is processed by our payment provider; we never see or store your full card details.
+
+We use this information to prepare and track your order, contact you if there's an issue, and (if you opt in) run features like loyalty stamps and points. We don't sell your information to anyone, and we don't share it beyond what's needed to fulfil your order (e.g. our payment processor) or as required by law.
+
+Your order history is kept for our own records and reporting. You can ask us to delete your account at any time from Account Settings, or by contacting us directly - this removes your personal details from our systems, though past orders may be retained in an anonymized form for accounting purposes.
+
+If you have questions about your data, contact us using the details in the footer below.`;
+
 if (!fs.existsSync(CONFIG_FILE)) {
   writeJson(CONFIG_FILE, {
     shopName: "SEVEN BITS COFFEE",
@@ -333,7 +348,8 @@ if (!fs.existsSync(CONFIG_FILE)) {
     // opts in from Discounts & Loyalty same as it would for a coupon.
     stampCard: {
       enabled: false
-    }
+    },
+    privacyPolicy: DEFAULT_PRIVACY_POLICY
     // Table count and arcade settings (Operations) used to live here, but
     // are now fully per-store - see DEFAULT_STORE_OPERATIONS and each
     // store's own `operations` field.
@@ -3780,6 +3796,29 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
   }
   writeJson(CONFIG_FILE, config);
   sendJson(res, 200, maskSecrets(config));
+});
+
+// Privacy policy text - a deliberate exception to "owner is read-only
+// outside adding Global Admins" (see the franchise-governance comment
+// elsewhere): this is legal-facing content the shop OWNER needs to be able
+// to fix themselves without waiting on a Global Admin, so both roles can
+// write here even though every other config field above is Global-Admin-
+// only. Shown in the customer-facing footer modal (renderPrivacyPolicyModal(),
+// app.js) via the plain config.privacyPolicy field GET /api/config already
+// returns - no separate read route needed.
+route("PATCH", /^\/api\/config\/privacy-policy\/?$/, async (req, res) => {
+  const session = requireRole(req, res, ["owner", "admin"]);
+  if (!session) return;
+  if (session.role === "admin" && accessibleStoreIds(session) !== null) {
+    return sendJson(res, 403, { error: "Only a Global Admin or the owner can edit the privacy policy" });
+  }
+  const body = await readBody(req);
+  const text = typeof body.privacyPolicy === "string" ? body.privacyPolicy.trim().slice(0, 20000) : "";
+  if (!text) return sendJson(res, 400, { error: "Privacy policy text can't be empty" });
+  const config = readJson(CONFIG_FILE, {});
+  config.privacyPolicy = text;
+  writeJson(CONFIG_FILE, config);
+  sendJson(res, 200, { privacyPolicy: text });
 });
 
 route("DELETE", /^\/api\/config\/custom-icons\/(?<key>[\w-]+)\/?$/, async (req, res, params) => {
