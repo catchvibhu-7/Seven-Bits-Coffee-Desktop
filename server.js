@@ -145,6 +145,7 @@ process.on("unhandledRejection", (reason) => {
 
 const { initDb, readJson, writeJson, jsonExists, readJsonFile, writeJsonFile, backupTo, restoreFromBuffer } = require("./db.js");
 const s3 = require("./s3.js");
+const email = require("./email.js");
 
 /** Hot backup of the live app.db to a temp file, read back as a Buffer,
  *  temp file removed - the one building block both the plain and encrypted
@@ -295,6 +296,13 @@ If you have questions about your data, contact us using the details in the foote
 
 if (!jsonExists(CONFIG_FILE)) {
   writeJson(CONFIG_FILE, {
+    // Whether the first-run setup wizard (owner account + store name/
+    // address + optional demo data - see POST /api/setup/complete) has
+    // been completed yet. False only on a genuinely fresh install/clean-
+    // install (see main.js's "Reset to Clean Install" menu action) -
+    // GET /api/setup/status tells the frontend whether to show it instead
+    // of the normal home page.
+    setupCompleted: false,
     shopName: "SEVEN BITS COFFEE",
     // Multi-currency - currencySymbol is what every price display in the
     // app uses (menu, cart, checkout, billing, receipts); currencyCode is
@@ -336,6 +344,14 @@ if (!jsonExists(CONFIG_FILE)) {
     s3Region: "us-east-1",
     s3AccessKeyId: "",
     s3SecretAccessKey: "",
+    // Email OTP for the customer forgot-password flow (see POST
+    // /api/auth/forgot-password/request) - off by default, since it needs
+    // a Resend API key an owner has to actually sign up for. While off,
+    // that route just tells a customer to contact staff for a reset -
+    // never silently falls back to the old username+phone "proof" alone.
+    emailEnabled: false,
+    emailApiKey: "",
+    emailFromAddress: "",
     // Branding - drives CSS custom properties at runtime (see app.js
     // applyBranding()). Defaults match the original hardcoded theme, so
     // nothing changes visually until an admin edits these.
@@ -346,7 +362,13 @@ if (!jsonExists(CONFIG_FILE)) {
       surface: "#111111",
       text: "#f9fafb",
       textMuted: "#888888",
-      secondary: "#22d3ee"
+      secondary: "#22d3ee",
+      // "Closed for the day"/"orders paused" home banner + the delivery-
+      // paused ticker - a blue complementary to the default amber accent
+      // (rather than another warm/saturated tone competing with it) so it
+      // reads as a distinct notice without the two visually fighting each
+      // other. Still clearly a "pay attention" color, just not a klaxon.
+      banner: "#3b82f6"
     },
     // Home page hero photo(s) - a shop can set up to 5, each with its own
     // title/subtitle, and the home page cycles through them (see
@@ -427,6 +449,7 @@ if (!jsonExists(CONFIG_FILE)) {
 // admin changes them, so a toggle/credential change takes effect
 // immediately with no restart needed.
 s3.configure(readJson(CONFIG_FILE, {}));
+email.configure(readJson(CONFIG_FILE, {}));
 
 // One-time boot migration: back-fill storeId:null (franchise-wide) onto any
 // coupon created before coupons gained per-store scoping, without touching
@@ -513,7 +536,8 @@ const DEFAULT_BRANDING = {
     surface: "#111111",
     text: "#f9fafb",
     textMuted: "#888888",
-    secondary: "#22d3ee"
+    secondary: "#22d3ee",
+    banner: "#3b82f6"
   },
   heroImages: [],
   logoUrl: "",
@@ -767,6 +791,13 @@ readJson(USERS_FILE, []).forEach((u) => usernameBloomFilter.add(u.username));
 
 const sessions = new Map(); // token -> { expiresAt, role, userId, name, phone }
 const authAttempts = new Map(); // ip -> { count, lockUntil }
+// userId -> { code, expiresAt, attempts } - deliberately in-memory, not
+// persisted like everything else: an OTP is meant to be short-lived
+// (OTP_TTL_MS below) and losing it on a restart just means the customer
+// requests a new one, which is fine.
+const passwordResetOtps = new Map();
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
 
 function createSession(payload) {
   const token = crypto.randomBytes(32).toString("hex");
@@ -793,6 +824,17 @@ function destroySession(token) {
 function invalidateSessionsForUser(userId) {
   for (const [token, s] of sessions.entries()) {
     if (s.userId === userId) sessions.delete(token);
+  }
+}
+
+/** Patches live session data (name/phone) after a self-service profile
+ *  edit (see PATCH /api/auth/me) - sessions carry their own snapshot of
+ *  these fields (see the `sessions` Map above), not a live read of the
+ *  user record, so without this a person's already-open session(s) would
+ *  keep showing the old name/phone until they logged in again. */
+function updateSessionsForUser(userId, patch) {
+  for (const s of sessions.values()) {
+    if (s.userId === userId) Object.assign(s, patch);
   }
 }
 
@@ -1588,6 +1630,80 @@ function matchRoute(method, pathname) {
 }
 
 // --- Auth ---
+
+// Whether the frontend should show the first-run setup wizard instead of
+// the normal home page - public (no session yet on a fresh install).
+route("GET", /^\/api\/setup\/status\/?$/, async (req, res) => {
+  const config = readJson(CONFIG_FILE, {});
+  sendJson(res, 200, { needed: !config.setupCompleted });
+});
+
+/** One-time, unauthenticated (nobody's logged in yet on a fresh install)
+ *  first-run setup: creates the real owner account, names the shop/first
+ *  store, and optionally loads the bundled demo catalog - see
+ *  applyBackupPayload() further down. Rejects outright once setupCompleted
+ *  is already true, so this can never be replayed against a shop that's
+ *  already running for real. The bootstrapOwnerAccount() "owner"/env-var
+ *  account (above, near the top of this file) is deliberately left in
+ *  place alongside whatever account this creates - a temporary safety net
+ *  while this wizard is new, not a permanent second owner account. */
+route("POST", /^\/api\/setup\/complete\/?$/, async (req, res) => {
+  const config = readJson(CONFIG_FILE, {});
+  if (config.setupCompleted) {
+    return sendJson(res, 403, { error: "Setup has already been completed" });
+  }
+  const body = await readBody(req);
+  const username = String(body.ownerUsername || "").trim();
+  const password = String(body.ownerPassword || "");
+  const name = String(body.ownerName || "").trim();
+  const shopName = String(body.shopName || "").trim();
+
+  if (username.length < 3) return sendJson(res, 400, { error: "Owner username must be at least 3 characters" });
+  const pwIssues = passwordIssues(password);
+  if (pwIssues.length) return sendJson(res, 400, { error: pwIssues[0] });
+  if (!shopName) return sendJson(res, 400, { error: "Enter a shop/store name" });
+
+  let owner;
+  try {
+    owner = createUser({ username, password, role: "owner", name: name || username });
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+
+  // Demo restore first (if requested) - it brings its own config.json/
+  // stores.json snapshot (see BACKUP_FILES), which would otherwise
+  // clobber the shopName/address/phone this wizard is about to set below.
+  // Never touches users.json (confirmed absent from the bundle), so the
+  // owner account just created above survives this untouched.
+  let demoLoaded = false;
+  if (body.loadDemoData) {
+    const demoPath = path.join(SEED_DIR, "demo-backup.json");
+    const payload = readJsonFile(demoPath, null);
+    if (payload && payload.files) {
+      await applyBackupPayload({ files: payload.files, uploads: payload.uploads });
+      demoLoaded = true;
+    }
+  }
+
+  const finalConfig = readJson(CONFIG_FILE, {});
+  finalConfig.shopName = shopName.slice(0, 60);
+  finalConfig.setupCompleted = true;
+  writeJson(CONFIG_FILE, finalConfig);
+
+  const stores = readJson(STORES_FILE, []);
+  if (stores[0]) {
+    stores[0].name = shopName.slice(0, 60);
+    if (typeof body.storeAddress === "string") stores[0].address = body.storeAddress.trim().slice(0, 200);
+    if (typeof body.storePhone === "string") stores[0].phone = normalizePhone(body.storePhone) || "";
+    writeJson(STORES_FILE, stores);
+  }
+
+  const token = createSession({ role: owner.role, userId: owner.id, name: owner.name, phone: owner.phone, storeId: owner.storeId, storeAccess: owner.storeAccess || null });
+  setSessionCookie(res, token, req);
+  logEvent("info", "First-run setup completed", { ownerUsername: username, demoLoaded });
+  sendJson(res, 200, { ok: true, role: owner.role, name: owner.name, demoLoaded });
+});
+
 route("POST", /^\/api\/auth\/register\/?$/, async (req, res) => {
   const ip = getClientIp(req);
   const limit = checkRateLimit(ip);
@@ -1702,6 +1818,70 @@ route("POST", /^\/api\/auth\/change-password\/?$/, async (req, res) => {
   sendJson(res, 200, { ok: true });
 });
 
+/** Current account's own full record (minus salt/hash) - the session
+ *  object itself only ever carries name/phone (see the `sessions` Map),
+ *  not email, so the self-service profile modal fetches this once to
+ *  know what's actually saved before rendering editable fields. */
+route("GET", /^\/api\/auth\/me\/?$/, async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session || session.userId == null) {
+    if (session) sendJson(res, 400, { error: "Guest sessions have no profile" });
+    return;
+  }
+  const user = findUserById(session.userId);
+  if (!user) return sendJson(res, 404, { error: "Account not found" });
+  sendJson(res, 200, publicUser(user));
+});
+
+/** Self-service profile edit for ANY logged-in account (owner/admin/
+ *  manager/employee/customer - not a guest, which has no persistent
+ *  record). Deliberately limited to name/phone/email - never role,
+ *  payRate, storeId, storeAccess, or tag, all of which stay admin-only
+ *  (see PATCH /api/users/:id) so a staff member can't quietly promote or
+ *  give themselves a raise through their own account settings. Email
+ *  changes require re-confirming the current password, same as account
+ *  deletion below - it's the sole proof-of-ownership for password reset
+ *  now (see POST /api/auth/forgot-password/request), so changing it is a
+ *  credential change, not a plain profile edit. */
+route("PATCH", /^\/api\/auth\/me\/?$/, async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session || session.userId == null) {
+    if (session) sendJson(res, 400, { error: "Guest sessions have no profile to edit" });
+    return;
+  }
+  const body = await readBody(req);
+  const users = readJson(USERS_FILE, []);
+  const user = users.find((u) => u.id === session.userId);
+  if (!user) return sendJson(res, 404, { error: "Account not found" });
+
+  const patch = {};
+  if (typeof body.name === "string") {
+    const name = body.name.replace(/[ -]/g, "").trim().slice(0, 60);
+    if (!name) return sendJson(res, 400, { error: "Name can't be empty" });
+    user.name = name;
+    patch.name = name;
+  }
+  if (typeof body.phone === "string") {
+    const phone = normalizePhone(body.phone);
+    if (!phone) return sendJson(res, 400, { error: "Enter a valid phone number" });
+    user.phone = phone;
+    patch.phone = phone;
+  }
+  if (typeof body.email === "string") {
+    const emailValue = body.email.trim().toLowerCase();
+    if (emailValue && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailValue)) {
+      return sendJson(res, 400, { error: "Enter a valid email address" });
+    }
+    if (!verifyPassword(body.currentPassword, user.salt, user.hash)) {
+      return sendJson(res, 401, { error: "Current password is incorrect" });
+    }
+    user.email = emailValue || null;
+  }
+  writeJson(USERS_FILE, users);
+  updateSessionsForUser(user.id, patch);
+  sendJson(res, 200, publicUser(user));
+});
+
 /** Self-service account deletion (right-to-erasure): a customer scrubs their
  *  own PII and permanently loses the ability to log in. The record itself is
  *  never removed - orders already froze their own copy of customerId/
@@ -1769,13 +1949,17 @@ route("POST", /^\/api\/account\/delete\/?$/, async (req, res) => {
   sendJson(res, 200, { ok: true });
 });
 
-route("POST", /^\/api\/auth\/forgot-password\/?$/, async (req, res) => {
-  // Customer self-service reset: proving you know the account's username AND
-  // its phone number is treated as proof of ownership (there's no email/SMS
-  // gateway configured to do a "real" verification link/OTP). This mirrors
-  // the same trust model guest order-tracking already uses. Staff accounts
-  // don't get self-service reset - an owner/admin issues them a temp
-  // password instead (see POST /api/users/:id/reset-password).
+// Customer self-service reset, two steps. The OLD version of this route
+// treated "knows the username and phone number" as proof of ownership and
+// reset the password in one shot - phone numbers aren't secret (staff see
+// them at checkout, they're not a login credential), so that let anyone
+// who knew or guessed both take over a customer's account outright. Now
+// it requires a one-time code emailed to the address already saved on the
+// account (see PATCH /api/auth/me) - actual proof of owning something the
+// account holder controls. Staff accounts still never get self-service
+// reset either way - an owner/admin issues them a temp password instead
+// (see POST /api/users/:id/reset-password).
+route("POST", /^\/api\/auth\/forgot-password\/request\/?$/, async (req, res) => {
   const ip = getClientIp(req);
   const limit = checkRateLimit(ip);
   if (!limit.allowed) {
@@ -1784,18 +1968,63 @@ route("POST", /^\/api\/auth\/forgot-password\/?$/, async (req, res) => {
 
   const body = await readBody(req);
   const user = findUserByUsername(body.username);
-  const phone = normalizePhone(body.phone);
 
-  if (!user || user.role !== "customer" || !phone || user.phone !== phone) {
+  // Same response whether the username doesn't exist, isn't a customer, or
+  // has no email on file - never reveals which case it was (username
+  // enumeration).
+  const genericResponse = { ok: true, message: "If that account has a recovery email on file, a code has been sent to it." };
+
+  if (!email.isEnabled()) {
+    // No provider configured at all - the honest answer for every request,
+    // not a per-account leak the way silently succeeding here would be.
+    return sendJson(res, 200, { ok: true, message: "Password reset isn't available right now - contact staff for help." });
+  }
+  if (!user || user.role !== "customer" || !user.email) {
     recordAuthFailure(ip);
-    // Deliberately vague - doesn't reveal whether the username exists.
-    return sendJson(res, 400, { error: "Username and phone number don't match a customer account" });
+    return sendJson(res, 200, genericResponse);
+  }
+
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  passwordResetOtps.set(user.id, { code, expiresAt: Date.now() + OTP_TTL_MS, attempts: 0 });
+  try {
+    await email.sendEmail(user.email, "Your password reset code", `Your Seven Bits Coffee password reset code is ${code}. It expires in 10 minutes. If you didn't request this, ignore this email.`);
+  } catch (e) {
+    logEvent("error", "Password reset email failed to send", { message: e.message });
+    // Still the same generic response - not confirming/denying anything
+    // about the account to the caller either way.
+  }
+  recordAuthSuccess(ip);
+  sendJson(res, 200, genericResponse);
+});
+
+route("POST", /^\/api\/auth\/forgot-password\/verify\/?$/, async (req, res) => {
+  const ip = getClientIp(req);
+  const limit = checkRateLimit(ip);
+  if (!limit.allowed) {
+    return sendJson(res, 429, { error: `Too many attempts. Try again in ${Math.ceil(limit.retryAfterMs / 1000)}s.` });
+  }
+
+  const body = await readBody(req);
+  const user = findUserByUsername(body.username);
+  const pending = user && passwordResetOtps.get(user.id);
+
+  if (!pending || Date.now() > pending.expiresAt) {
+    recordAuthFailure(ip);
+    if (user) passwordResetOtps.delete(user.id);
+    return sendJson(res, 400, { error: "That code has expired or is invalid - request a new one." });
+  }
+  pending.attempts++;
+  if (pending.attempts > OTP_MAX_ATTEMPTS || String(body.code || "") !== pending.code) {
+    recordAuthFailure(ip);
+    if (pending.attempts > OTP_MAX_ATTEMPTS) passwordResetOtps.delete(user.id);
+    return sendJson(res, 400, { error: "Incorrect code." });
   }
 
   const pwIssues = passwordIssues(body.newPassword);
   if (pwIssues.length) return sendJson(res, 400, { error: pwIssues[0] });
 
   recordAuthSuccess(ip);
+  passwordResetOtps.delete(user.id);
   setUserPassword(user.id, body.newPassword, { mustChangePassword: false });
   sendJson(res, 200, { ok: true });
 });
@@ -3692,8 +3921,8 @@ function configForSession(session, explicitStoreId = null) {
 // it's meant for the client-side checkout widget). The secret only ever
 // needs to leave this process when calling Razorpay's API server-to-server.
 function maskSecrets(config) {
-  const { razorpayKeySecret, s3SecretAccessKey, ...rest } = config;
-  return { ...rest, razorpaySecretConfigured: !!razorpayKeySecret, s3SecretConfigured: !!s3SecretAccessKey };
+  const { razorpayKeySecret, s3SecretAccessKey, emailApiKey, ...rest } = config;
+  return { ...rest, razorpaySecretConfigured: !!razorpayKeySecret, s3SecretConfigured: !!s3SecretAccessKey, emailApiKeyConfigured: !!emailApiKey };
 }
 
 route("GET", /^\/api\/config\/?$/, async (req, res, params, url) => {
@@ -3743,7 +3972,9 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
     "s3Endpoint",
     "s3Bucket",
     "s3Region",
-    "s3AccessKeyId"
+    "s3AccessKeyId",
+    "emailEnabled",
+    "emailFromAddress"
   ];
   for (const key of allowed) {
     if (body[key] !== undefined) config[key] = body[key];
@@ -3753,6 +3984,8 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
   if (typeof config.s3Bucket === "string") config.s3Bucket = config.s3Bucket.trim().slice(0, 200);
   if (typeof config.s3Region === "string") config.s3Region = config.s3Region.trim().slice(0, 60) || "us-east-1";
   if (typeof config.s3AccessKeyId === "string") config.s3AccessKeyId = config.s3AccessKeyId.trim().slice(0, 200);
+  if (config.emailEnabled !== undefined) config.emailEnabled = Boolean(config.emailEnabled);
+  if (typeof config.emailFromAddress === "string") config.emailFromAddress = config.emailFromAddress.trim().slice(0, 200);
   if (body.loyalty && typeof body.loyalty === "object") {
     config.loyalty = { ...config.loyalty, ...body.loyalty };
     config.loyalty.enabled = Boolean(config.loyalty.enabled);
@@ -3781,6 +4014,9 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
   // razorpayKeySecret above.
   if (typeof body.s3SecretAccessKey === "string" && body.s3SecretAccessKey.trim()) {
     config.s3SecretAccessKey = body.s3SecretAccessKey.trim().slice(0, 400);
+  }
+  if (typeof body.emailApiKey === "string" && body.emailApiKey.trim()) {
+    config.emailApiKey = body.emailApiKey.trim().slice(0, 200);
   }
   // shopName/heroTagline are rendered directly into the home page - cap
   // length and strip control chars so a bad paste can't break layout.
@@ -3903,6 +4139,7 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
   }
   writeJson(CONFIG_FILE, config);
   s3.configure(config);
+  email.configure(config);
   sendJson(res, 200, maskSecrets(config));
 });
 
@@ -4274,8 +4511,10 @@ route("POST", /^\/api\/admin\/restore\/encrypted\/?$/, async (req, res) => {
  *  table at a time - used only by POST /api/admin/restore/demo below,
  *  NOT by the whole-instance backup/restore routes above (those replace
  *  the entire app.db file instead, see restoreFromBuffer() in db.js).
- *  `uploads` (filename -> base64 content) get pushed to S3 - the demo
- *  bundle's own photos, not anything a caller uploads freeform. */
+ *  `uploads` (filename -> base64 content) land wherever uploads currently
+ *  live - local disk by default, S3 if that's turned on (see s3.js) -
+ *  same as any other upload, since these are just the demo bundle's own
+ *  photos, not anything a caller uploads freeform. */
 async function applyBackupPayload({ files, uploads }) {
   // A backup taken before someone deleted their account would otherwise
   // resurrect that account's real login credentials the moment it's
@@ -4331,12 +4570,17 @@ async function applyBackupPayload({ files, uploads }) {
       // (crypto.randomBytes hex + a fixed extension - see POST
       // /api/uploads) - never trust that blindly on the way back in from a
       // file someone could hand-edit, so re-validate the shape before it
-      // becomes an S3 key.
+      // becomes a filesystem path or S3 key.
       if (!/^[a-f0-9]{16}\.(png|jpg|jpeg|gif|webp)$/i.test(filename)) continue;
       try {
-        const ext = filename.slice(filename.lastIndexOf(".") + 1).toLowerCase();
-        const mimeType = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" }[ext];
-        await s3.putObject(filename, Buffer.from(base64, "base64"), mimeType);
+        const buffer = Buffer.from(base64, "base64");
+        if (s3.isEnabled()) {
+          const ext = filename.slice(filename.lastIndexOf(".") + 1).toLowerCase();
+          const mimeType = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" }[ext];
+          await s3.putObject(filename, buffer, mimeType);
+        } else {
+          fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
+        }
         uploadsRestored++;
       } catch (e) {
         // One bad file shouldn't abort restoring everything else.

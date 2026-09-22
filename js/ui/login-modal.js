@@ -22,8 +22,9 @@ export function renderLoginModal(onSuccess, options = {}) {
     const { title = t("login.modalTitleDefault"), allowGuest = false, allowRegister = false } = options;
     document.getElementById("login-overlay")?.remove();
 
-    let mode = "login"; // "login" | "guest" | "register" | "forgot"
+    let mode = "login"; // "login" | "guest" | "register" | "forgot" | "forgot-verify"
     let usernameCheckTimer;
+    let forgotUsername = ""; // carried from "forgot" into "forgot-verify" once a code's been requested
 
     const overlay = document.createElement("div");
     overlay.id = "login-overlay";
@@ -67,10 +68,17 @@ export function renderLoginModal(onSuccess, options = {}) {
             fields = `
                 <p style="font-size: 11px; color: var(--color-text-muted); margin-top:0;">${t("login.forgotNote")}</p>
                 <input id="lf-username" type="text" placeholder="${t("login.forgotUsernamePlaceholder")}" aria-label="${t("login.forgotUsernamePlaceholder")}" autocomplete="username" style="${fieldStyle()}" />
-                <input id="lf-phone" type="tel" placeholder="${t("login.forgotPhonePlaceholder")}" aria-label="${t("login.forgotPhonePlaceholder")}" autocomplete="tel" style="${fieldStyle()}" />
+                <p style="font-size: 10px; color: var(--color-text-muted); margin: 10px 0 0;">${t("login.staffResetNote")}</p>
+                <p id="login-error" style="color:var(--color-danger); font-size: 11px; min-height: 12px; margin: 6px 0 0;"></p>
+                <p id="login-success" style="color:var(--color-success); font-size: 11px; min-height: 12px; margin: 0;"></p>
+            `;
+        } else if (mode === "forgot-verify") {
+            fields = `
+                <p style="font-size: 11px; color: var(--color-text-muted); margin-top:0;">${t("login.forgotVerifyNote")}</p>
+                <input id="lf-code" type="text" inputmode="numeric" maxlength="6" placeholder="${t("login.forgotCodePlaceholder")}" aria-label="${t("login.forgotCodePlaceholder")}" autocomplete="one-time-code" style="${fieldStyle()}" />
                 <input id="lf-password" type="password" placeholder="${t("login.newPasswordPlaceholder")}" aria-label="${t("login.newPasswordPlaceholder")}" autocomplete="new-password" style="${fieldStyle()}" />
                 <div id="lf-password-meter"></div>
-                <p style="font-size: 10px; color: var(--color-text-muted); margin: 10px 0 0;">${t("login.staffResetNote")}</p>
+                <button id="lf-resend-code" type="button" style="background:none; border:none; color:var(--color-text-muted); font-size:10px; text-decoration:underline; cursor:pointer; padding:0; margin-top:6px; font-family:inherit;">${t("login.resendCodeLink")}</button>
                 <p id="login-error" style="color:var(--color-danger); font-size: 11px; min-height: 12px; margin: 6px 0 0;"></p>
                 <p id="login-success" style="color:var(--color-success); font-size: 11px; min-height: 12px; margin: 0;"></p>
             `;
@@ -79,11 +87,11 @@ export function renderLoginModal(onSuccess, options = {}) {
         overlay.innerHTML = `
             <div class="modal-content" style="border: 2px solid var(--color-accent); background: var(--color-surface); color: var(--color-text); padding: 30px; width: 320px; font-family: 'Courier New', monospace;">
                 <h2 class="modal-title-header">
-                    ${mode === "forgot" ? t("login.resetPasswordTitle") : title}
+                    ${mode === "forgot" || mode === "forgot-verify" ? t("login.resetPasswordTitle") : title}
                 </h2>
 
                 ${
-                    tabs.length > 1 && mode !== "forgot"
+                    tabs.length > 1 && mode !== "forgot" && mode !== "forgot-verify"
                         ? `<div id="login-tabs" style="display:flex; gap:6px; margin-bottom:15px;">${tabs.join("")}</div>`
                         : ""
                 }
@@ -92,10 +100,10 @@ export function renderLoginModal(onSuccess, options = {}) {
 
                 <div style="display: grid; gap: 10px;">
                     <button id="login-submit" class="modal-btn-primary">
-                        ${mode === "login" ? t("login.submitLogin") : mode === "guest" ? t("login.submitGuest") : mode === "forgot" ? t("login.submitForgot") : t("login.submitRegister")}
+                        ${mode === "login" ? t("login.submitLogin") : mode === "guest" ? t("login.submitGuest") : mode === "forgot" ? t("login.submitForgot") : mode === "forgot-verify" ? t("login.submitForgotVerify") : t("login.submitRegister")}
                     </button>
                     <button id="login-cancel" class="modal-btn-secondary">
-                        ${mode === "forgot" ? t("common.backToLogin") : t("common.cancel")}
+                        ${mode === "forgot" || mode === "forgot-verify" ? t("common.backToLogin") : t("common.cancel")}
                     </button>
                 </div>
             </div>
@@ -110,7 +118,10 @@ export function renderLoginModal(onSuccess, options = {}) {
         });
 
         document.getElementById("login-cancel").addEventListener("click", () => {
-            if (mode === "forgot") {
+            if (mode === "forgot-verify") {
+                mode = "forgot";
+                render();
+            } else if (mode === "forgot") {
                 mode = "login";
                 render();
             } else {
@@ -121,6 +132,17 @@ export function renderLoginModal(onSuccess, options = {}) {
         document.getElementById("lf-forgot-link")?.addEventListener("click", () => {
             mode = "forgot";
             render();
+        });
+        document.getElementById("lf-resend-code")?.addEventListener("click", async () => {
+            const errorEl = document.getElementById("login-error");
+            const successEl = document.getElementById("login-success");
+            errorEl.textContent = "";
+            try {
+                await AuthSystem.requestPasswordResetCode(forgotUsername);
+                successEl.textContent = t("login.codeResentNote");
+            } catch (e) {
+                errorEl.textContent = e.message || t("login.fallbackError");
+            }
         });
 
         overlay.querySelectorAll("input").forEach((input) => {
@@ -193,10 +215,16 @@ export function renderLoginModal(onSuccess, options = {}) {
                 overlay.remove();
                 onSuccess(session);
             } else if (mode === "forgot") {
-                const username = document.getElementById("lf-username").value;
-                const phone = document.getElementById("lf-phone").value;
+                forgotUsername = document.getElementById("lf-username").value;
+                const data = await AuthSystem.requestPasswordResetCode(forgotUsername);
+                mode = "forgot-verify";
+                render();
+                const noteEl = document.getElementById("login-success");
+                if (noteEl) noteEl.textContent = data.message || "";
+            } else if (mode === "forgot-verify") {
+                const code = document.getElementById("lf-code").value;
                 const newPassword = document.getElementById("lf-password").value;
-                await AuthSystem.forgotPassword({ username, phone, newPassword });
+                await AuthSystem.verifyPasswordReset({ username: forgotUsername, code, newPassword });
                 successEl.textContent = t("login.passwordUpdated");
                 setTimeout(() => {
                     mode = "login";

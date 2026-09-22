@@ -99,14 +99,44 @@ export const AuthSystem = {
         return data;
     },
 
-    async forgotPassword({ username, phone, newPassword }) {
-        const res = await fetch("/api/auth/forgot-password", {
+    async requestPasswordResetCode(username) {
+        const res = await fetch("/api/auth/forgot-password/request", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ username, phone, newPassword })
+            body: JSON.stringify({ username })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Could not request a reset code");
+        return data;
+    },
+
+    async verifyPasswordReset({ username, code, newPassword }) {
+        const res = await fetch("/api/auth/forgot-password/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, code, newPassword })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "Could not reset password");
+        return data;
+    },
+
+    async getMyProfile() {
+        const res = await fetch("/api/auth/me", { credentials: "include" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Could not load profile");
+        return data;
+    },
+
+    async updateMyProfile(patch) {
+        const res = await fetch("/api/auth/me", {
+            method: "PATCH",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Could not update profile");
         return data;
     }
 };

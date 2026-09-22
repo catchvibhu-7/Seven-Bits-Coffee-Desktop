@@ -27,6 +27,7 @@ import { ArcadeSystem } from "./features/arcade/arcade-logic.js";
 import { StoreSystem } from "./features/store-logic.js";
 import { renderStorePickerModal } from "./ui/store-picker-modal.js";
 import { I18n, t } from "./features/i18n-logic.js";
+import { renderFirstRunSetup } from "./ui/first-run-setup.js";
 
 // --- System State ---
 let cart = [];
@@ -125,6 +126,11 @@ async function refreshSession() {
     }
     return session;
 }
+// Same cross-module bridge convention as window.applyBranding/showToast/
+// wireLangSwitcher below - lets a separate module (e.g. account-settings-
+// modal.js, after a self-service profile edit) pull the just-changed
+// name/phone back into the nav/greeting without importing this whole file.
+window.refreshSession = refreshSession;
 
 /**
  * Swaps in the app shell (left rail or top bar - js/ui/staff-shell.js) for
@@ -274,6 +280,7 @@ window.applyBranding = (config) => {
     if (colors.text) root.style.setProperty("--color-text", colors.text);
     if (colors.textMuted) root.style.setProperty("--color-text-muted", colors.textMuted);
     if (colors.secondary) root.style.setProperty("--color-cyan", colors.secondary);
+    if (colors.banner) root.style.setProperty("--color-banner", colors.banner);
 
     // Admin panel text styles - tab nav row + muted helper/description
     // paragraphs (see Branding tab "ADMIN PANEL TEXT"). Only touches the
@@ -2942,7 +2949,7 @@ async function renderHomeStampCard() {
         return;
     }
     root.style.display = "block";
-    root.className = "home-stamp-card";
+    root.className = "home-stamp-card home-widget";
 
     // Reuses the menu's own icon set (icon icon-espresso / icon icon-gift,
     // see css/iconsvg.css) rather than emoji, so this reads as part of the
@@ -3151,6 +3158,22 @@ function wireStaticControls() {
  * BOOT
  */
 (async () => {
+    // Genuinely fresh install (or after "Reset to Clean Install") - show
+    // the first-run setup page instead of booting the app for real. Its
+    // own reload-on-success (see first-run-setup.js) re-enters this same
+    // IIFE from scratch once setup's done, so nothing else in here needs
+    // to know this check ever happened.
+    try {
+        const setupRes = await fetch("/api/setup/status");
+        if (setupRes.ok && (await setupRes.json()).needed) {
+            renderFirstRunSetup();
+            return;
+        }
+    } catch (e) {
+        // Couldn't reach the server yet, or some other hiccup - fall through
+        // to the normal boot flow rather than getting stuck here forever.
+    }
+
     document.addEventListener("click", () => SoundSystem.unlock(), { once: true });
     await I18n.load(); // before any render, so the very first paint is already in the saved language
     translateMenuChrome();

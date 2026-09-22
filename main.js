@@ -59,12 +59,35 @@ function readVariant() {
     }
 }
 
+// Written by resetToCleanInstall() below, right before app.relaunch() -
+// checked and consumed here, at the very start of the NEXT process's
+// startup, before app.db is ever opened. Doing the actual wipe in a fresh
+// process (rather than the one showing the confirm dialog) avoids trying
+// to delete a SQLite file this same process still has open - Windows
+// won't allow that while a handle is held, relaunching first sidesteps
+// the whole problem.
+const CLEAN_INSTALL_MARKER = "pending-clean-install";
+
 function seedWritableDirs() {
     const userDataDir = app.getPath("userData");
     const dataDir = path.join(userDataDir, "data");
     const uploadsDir = path.join(userDataDir, "uploads");
     const logsDir = path.join(userDataDir, "logs");
     const backupsDir = path.join(userDataDir, "backups");
+
+    const cleanInstallMarkerPath = path.join(userDataDir, CLEAN_INSTALL_MARKER);
+    if (fs.existsSync(cleanInstallMarkerPath)) {
+        for (const sub of [dataDir, uploadsDir]) {
+            try {
+                fs.rmSync(sub, { recursive: true, force: true });
+            } catch (e) {
+                // Best effort - a partial wipe still results in isFreshInstall
+                // below reading true off the missing dataDir either way.
+            }
+        }
+        fs.unlinkSync(cleanInstallMarkerPath);
+    }
+
     // Both the demo-content auto-seed below and the upload-seeding right
     // after it are genuinely first-run-only - an update/reinstall over an
     // existing install (or one where the uninstaller's "keep data?" prompt
@@ -152,6 +175,31 @@ function startServer() {
     return { logsDir, backupsDir };
 }
 
+/** Wipes this shop's local data (menu, orders, staff accounts, locally-
+ *  stored photos) and restarts the app as if freshly installed, so the
+ *  first-run setup wizard runs again - a repeatable version of choosing
+ *  "erase and start fresh" during install (see build/installer.nsh),
+ *  useful for testing the wizard without actually reinstalling each time.
+ *  The wipe itself happens on the NEXT launch (see CLEAN_INSTALL_MARKER/
+ *  seedWritableDirs() above), not here - this process still has app.db
+ *  open. */
+function resetToCleanInstall() {
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+        type: "warning",
+        title: "Reset to Clean Install",
+        message: "This permanently deletes ALL local shop data - menu, orders, staff accounts, locally-stored photos - and restarts the app as if freshly installed.",
+        detail: "This can't be undone. If you have a backup you want to keep, cancel and download one first (Admin > Data & Backup).",
+        buttons: ["Cancel", "Erase Everything and Restart"],
+        defaultId: 0,
+        cancelId: 0
+    });
+    if (choice !== 1) return;
+
+    fs.writeFileSync(path.join(app.getPath("userData"), CLEAN_INSTALL_MARKER), new Date().toISOString());
+    app.relaunch();
+    app.exit(0);
+}
+
 let mainWindow;
 
 function createWindow() {
@@ -194,6 +242,10 @@ app.whenReady().then(async () => {
             {
                 label: "Network",
                 submenu: [{ label: "Show Network Address", click: () => showNetworkAddress() }]
+            },
+            {
+                label: "Advanced",
+                submenu: [{ label: "Reset to Clean Install…", click: () => resetToCleanInstall() }]
             },
             {
                 label: "Help",

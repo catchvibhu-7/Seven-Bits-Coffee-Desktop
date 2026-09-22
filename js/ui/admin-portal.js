@@ -109,8 +109,8 @@ function tabGroupsForRole(session) {
 }
 
 const THEME_PRESETS = {
-    dark: { accent: "#d97706", background: "#0a0a0a", surface: "#111111", text: "#f9fafb", textMuted: "#888888", secondary: "#22d3ee" },
-    light: { accent: "#d97706", background: "#f5f5f0", surface: "#ffffff", text: "#1a1a1a", textMuted: "#666666", secondary: "#0891b2" }
+    dark: { accent: "#d97706", background: "#0a0a0a", surface: "#111111", text: "#f9fafb", textMuted: "#888888", secondary: "#22d3ee", banner: "#3b82f6" },
+    light: { accent: "#d97706", background: "#f5f5f0", surface: "#ffffff", text: "#1a1a1a", textMuted: "#666666", secondary: "#0891b2", banner: "#2563eb" }
 };
 
 function ok(message) {
@@ -1181,6 +1181,10 @@ export const AdminPortal = {
             </div>
 
             <div class="config-controls" style="margin-top:20px;">
+                <div id="email-section"></div>
+            </div>
+
+            <div class="config-controls" style="margin-top:20px;">
                 <h3 style="margin-top:0;">BACKUP</h3>
                 <p class="admin-help-text">Downloads a complete copy of this app's database (menu, orders, staff accounts, config, everything). Uploaded photos aren't included in this file - back up the "uploads" folder separately if you're using local storage (see STORAGE below), or they're already durable in the cloud if you've turned on S3.</p>
                 <button class="admin-btn-primary" id="backup-download">DOWNLOAD BACKUP</button>
@@ -1300,6 +1304,50 @@ export const AdminPortal = {
                             ...(s3SecretAccessKey ? { s3SecretAccessKey } : {})
                         });
                         ok("Storage settings saved");
+                        this.renderDataBackup(root);
+                    }
+                })
+        });
+
+        renderReadOnlySection(document.getElementById("email-section"), {
+            title: "EMAIL (PASSWORD RESET)",
+            canEdit: isGlobalAdmin,
+            fields: [
+                { label: "Customer self-service reset", value: c.emailEnabled ? "Enabled" : "Disabled", tooltip: "When off, a customer who forgets their password is told to contact staff instead - never falls back to a less-secure method." },
+                ...(c.emailEnabled
+                    ? [
+                          { label: "From address", value: c.emailFromAddress || "" },
+                          { label: "API key", value: c.emailApiKeyConfigured ? "Configured" : "Not configured" }
+                      ]
+                    : [])
+            ],
+            onEdit: () =>
+                renderSectionEditModal({
+                    title: "EDIT EMAIL",
+                    fields: [
+                        { id: "pf-email-enabled", label: "Enable customer self-service password reset (via emailed code)", value: !!c.emailEnabled, type: "checkbox" },
+                        { id: "pf-email-from", label: "From address", value: c.emailFromAddress || "", maxlength: 200, placeholder: "shop@yourdomain.com" },
+                        {
+                            id: "pf-email-api-key",
+                            label: "Resend API key",
+                            value: "",
+                            type: "password",
+                            maxlength: 200,
+                            placeholder: c.emailApiKeyConfigured ? "•••••••• (saved - leave blank to keep)" : "re_xxxxxxxxxxxx",
+                            tooltip: "From resend.com - free tier covers a small shop's reset-email volume. Never shown back once saved."
+                        }
+                    ],
+                    onSave: async (v) => {
+                        if (v["pf-email-enabled"] && !v["pf-email-from"].trim()) {
+                            throw new Error("Enter a from address to enable email");
+                        }
+                        const emailApiKey = v["pf-email-api-key"].trim();
+                        await AdminConfig.saveSettings({
+                            emailEnabled: v["pf-email-enabled"],
+                            emailFromAddress: v["pf-email-from"].trim(),
+                            ...(emailApiKey ? { emailApiKey } : {})
+                        });
+                        ok("Email settings saved");
                         this.renderDataBackup(root);
                     }
                 })
@@ -3980,7 +4028,8 @@ export const AdminPortal = {
                 { label: "Background", value: colors.background || "#0a0a0a" },
                 { label: "Surface", value: colors.surface || "#111111" },
                 { label: "Text", value: colors.text || "#f9fafb" },
-                { label: "Secondary", value: colors.secondary || "#22d3ee", tooltip: "Used for “preparing” status, station tabs, etc." }
+                { label: "Secondary", value: colors.secondary || "#22d3ee", tooltip: "Used for “preparing” status, station tabs, etc." },
+                { label: "Banner", value: colors.banner || "#3b82f6", tooltip: "The “closed for the day”/“orders paused” home banner and the delivery-paused ticker." }
             ],
             onEdit: () => {
                 renderSectionEditModal({
@@ -4001,12 +4050,13 @@ export const AdminPortal = {
                         { id: "bf-background", label: "Background", value: colors.background || "#0a0a0a", type: "color" },
                         { id: "bf-surface", label: "Surface", value: colors.surface || "#111111", type: "color" },
                         { id: "bf-text", label: "Text", value: colors.text || "#f9fafb", type: "color" },
-                        { id: "bf-secondary", label: "Secondary", value: colors.secondary || "#22d3ee", type: "color" }
+                        { id: "bf-secondary", label: "Secondary", value: colors.secondary || "#22d3ee", type: "color" },
+                        { id: "bf-banner", label: "Banner", value: colors.banner || "#3b82f6", type: "color", tooltip: "“Closed for the day”/“orders paused” banner + delivery-paused ticker." }
                     ],
                     onSave: async (v) => {
                         await AdminConfig.saveSettings({
                             theme: v["bf-theme"],
-                            colors: { accent: v["bf-accent"], background: v["bf-background"], surface: v["bf-surface"], text: v["bf-text"], secondary: v["bf-secondary"] }
+                            colors: { accent: v["bf-accent"], background: v["bf-background"], surface: v["bf-surface"], text: v["bf-text"], secondary: v["bf-secondary"], banner: v["bf-banner"] }
                         });
                         if (window.applyBranding) window.applyBranding(AdminConfig.settings);
                         ok("Theme saved");
@@ -4023,6 +4073,7 @@ export const AdminPortal = {
                     document.getElementById("bf-surface").value = preset.surface;
                     document.getElementById("bf-text").value = preset.text;
                     document.getElementById("bf-secondary").value = preset.secondary;
+                    document.getElementById("bf-banner").value = preset.banner;
                 });
             }
         });

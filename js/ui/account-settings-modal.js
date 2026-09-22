@@ -7,6 +7,68 @@ import { renderPasswordStrengthMeter } from "../features/password-strength.js";
 import { StaffShell } from "./staff-shell.js";
 import { t } from "../features/i18n-logic.js";
 
+function escapeHtmlAttr(str) {
+    return String(str || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/** Lazy-loaded contents of the "My Profile" toggle above - fetches the
+ *  real current name/phone/email (GET /api/auth/me, since the session
+ *  object itself never carries email) and renders editable fields.
+ *  Name/phone save with no extra confirmation; changing email requires
+ *  re-entering the current password (see PATCH /api/auth/me's own
+ *  reasoning - email is the sole proof-of-ownership for password reset
+ *  now, so changing it is a credential change). */
+async function renderProfileFields(container) {
+    container.innerHTML = `<p style="font-size:11px; color:var(--color-text-muted); margin:0;">${t("common.loading")}</p>`;
+    let profile;
+    try {
+        profile = await AuthSystem.getMyProfile();
+    } catch (e) {
+        container.innerHTML = `<p style="color:var(--color-danger); font-size:11px; margin:0;">${e.message || t("account.profileLoadFailed")}</p>`;
+        return;
+    }
+
+    const originalEmail = profile.email || "";
+    container.innerHTML = `
+        <p id="am-profile-error" style="color:var(--color-danger); font-size:11px; margin:0 0 8px;"></p>
+        <p id="am-profile-success" style="color:var(--color-success); font-size:11px; margin:0 0 8px;"></p>
+        <input id="am-profile-name" type="text" placeholder="${t("account.nameFieldPlaceholder")}" aria-label="${t("account.nameFieldPlaceholder")}" value="${escapeHtmlAttr(profile.name || "")}"
+            style="width:100%; box-sizing:border-box; background:var(--color-bg); border:1px solid var(--color-border); color:var(--color-text); padding:10px; font-family:inherit; margin-bottom:8px;" />
+        <input id="am-profile-phone" type="tel" placeholder="${t("login.phonePlaceholder")}" aria-label="${t("login.phonePlaceholder")}" value="${escapeHtmlAttr(profile.phone || "")}"
+            style="width:100%; box-sizing:border-box; background:var(--color-bg); border:1px solid var(--color-border); color:var(--color-text); padding:10px; font-family:inherit; margin-bottom:8px;" />
+        <input id="am-profile-email" type="email" placeholder="${t("account.recoveryEmailPlaceholder")}" aria-label="${t("account.recoveryEmailPlaceholder")}" value="${escapeHtmlAttr(originalEmail)}"
+            style="width:100%; box-sizing:border-box; background:var(--color-bg); border:1px solid var(--color-border); color:var(--color-text); padding:10px; font-family:inherit; margin-bottom:4px;" />
+        <p style="font-size:10px; color:var(--color-text-muted); margin:0 0 8px;">${t("account.recoveryEmailNote")}</p>
+        <input id="am-profile-current-password" type="password" placeholder="${t("account.currentPasswordPlaceholder")}" aria-label="${t("account.currentPasswordAria")}" autocomplete="current-password"
+            style="width:100%; box-sizing:border-box; background:var(--color-bg); border:1px solid var(--color-border); color:var(--color-text); padding:10px; font-family:inherit; margin-bottom:8px;" />
+        <p style="font-size:10px; color:var(--color-text-muted); margin:0 0 10px;">${t("account.currentPasswordOnlyForEmailNote")}</p>
+        <button id="am-profile-save" style="width:100%; background:var(--color-accent); color:var(--color-accent-contrast); border:none; padding:12px; font-weight:bold; cursor:pointer; text-transform:uppercase;">${t("account.saveProfile")}</button>
+    `;
+
+    document.getElementById("am-profile-save").addEventListener("click", async () => {
+        const errorEl = document.getElementById("am-profile-error");
+        const successEl = document.getElementById("am-profile-success");
+        errorEl.textContent = "";
+        successEl.textContent = "";
+        const patch = {
+            name: document.getElementById("am-profile-name").value,
+            phone: document.getElementById("am-profile-phone").value
+        };
+        const newEmail = document.getElementById("am-profile-email").value.trim();
+        if (newEmail !== originalEmail) {
+            patch.email = newEmail;
+            patch.currentPassword = document.getElementById("am-profile-current-password").value;
+        }
+        try {
+            await AuthSystem.updateMyProfile(patch);
+            successEl.textContent = t("account.profileSaved");
+            await window.refreshSession?.();
+        } catch (e) {
+            errorEl.textContent = e.message || t("account.profileSaveFailed");
+        }
+    });
+}
+
 export function renderAccountSettingsModal(session) {
     document.getElementById("account-modal-overlay")?.remove();
 
@@ -49,6 +111,22 @@ export function renderAccountSettingsModal(session) {
                 <button type="button" id="am-layout-rail" style="flex:1; padding:10px; background:${currentLayout === "rail" ? "rgba(217,119,6,.12)" : "transparent"}; border:1px solid ${currentLayout === "rail" ? "var(--color-accent)" : "var(--color-border)"}; color:${currentLayout === "rail" ? "var(--color-accent)" : "var(--color-text)"}; font-family:inherit; font-size:11px; font-weight:bold; letter-spacing:.05em; text-transform:uppercase; cursor:pointer;">${t("account.layoutLeftPane")}</button>
                 <button type="button" id="am-layout-topbar" style="flex:1; padding:10px; background:${currentLayout === "topbar" ? "rgba(217,119,6,.12)" : "transparent"}; border:1px solid ${currentLayout === "topbar" ? "var(--color-accent)" : "var(--color-border)"}; color:${currentLayout === "topbar" ? "var(--color-accent)" : "var(--color-text)"}; font-family:inherit; font-size:11px; font-weight:bold; letter-spacing:.05em; text-transform:uppercase; cursor:pointer;">${t("account.layoutTopBar")}</button>
             </div>
+            `
+                    : ""
+            }
+
+            <!-- A guest session has no persistent account at all - showing
+                 this for them would just let them hit a confusing "could
+                 not update profile" error. Collapsed by default otherwise,
+                 same lazy-load-on-open reasoning as the password/delete
+                 sections below - fetches the real current phone/email
+                 (not carried in the session object, see GET /api/auth/me)
+                 only once actually opened. -->
+            ${
+                session.role !== "guest"
+                    ? `
+            <button type="button" id="am-toggle-profile" aria-expanded="false" aria-controls="am-profile-fields" style="width:100%; text-align:left; background:none; border:1px solid var(--color-border); color:var(--color-text); padding:10px; font-family:inherit; font-size:12px; letter-spacing:1px; cursor:pointer; text-transform:uppercase; margin-bottom:12px;">${t("account.myProfileToggleClosed")}</button>
+            <div id="am-profile-fields" style="display:none; margin-bottom:12px;"></div>
             `
                     : ""
             }
@@ -110,6 +188,20 @@ export function renderAccountSettingsModal(session) {
     newField?.addEventListener("input", () => renderPasswordStrengthMeter(meterEl, newField.value));
 
     document.getElementById("am-close").addEventListener("click", () => overlay.remove());
+
+    const profileToggleBtn = document.getElementById("am-toggle-profile");
+    const profileFieldsEl = document.getElementById("am-profile-fields");
+    let profileLoaded = false;
+    profileToggleBtn?.addEventListener("click", async () => {
+        const opening = profileFieldsEl.style.display === "none";
+        profileFieldsEl.style.display = opening ? "block" : "none";
+        profileToggleBtn.textContent = opening ? t("account.myProfileToggleOpen") : t("account.myProfileToggleClosed");
+        profileToggleBtn.setAttribute("aria-expanded", String(opening));
+        if (opening && !profileLoaded) {
+            profileLoaded = true;
+            renderProfileFields(profileFieldsEl);
+        }
+    });
 
     const toggleBtn = document.getElementById("am-toggle-password");
     const fieldsEl = document.getElementById("am-password-fields");
