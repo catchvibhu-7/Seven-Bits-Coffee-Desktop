@@ -8,20 +8,18 @@
   "scripts": {
     "start": "electron .",
     "icon": "node scripts/generate-icon.js",
-    "rebuild-native": "node scripts/rebuild-native.js",
-    "dist": "npm run rebuild-native && node scripts/set-variant.js regular && electron-builder",
-    "dist:win": "npm run rebuild-native && node scripts/set-variant.js regular && electron-builder --win",
-    "dist:mac": "npm run rebuild-native && node scripts/set-variant.js regular && electron-builder --mac",
-    "dist:linux": "npm run rebuild-native && node scripts/set-variant.js regular && electron-builder --linux",
-    "dist:win:demo": "npm run rebuild-native && node scripts/set-variant.js demo && electron-builder --win --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo",
-    "dist:mac:demo": "npm run rebuild-native && node scripts/set-variant.js demo && electron-builder --mac --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo",
-    "dist:linux:demo": "npm run rebuild-native && node scripts/set-variant.js demo && electron-builder --linux --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo"
+    "dist": "node scripts/set-variant.js regular && electron-builder",
+    "dist:win": "node scripts/set-variant.js regular && electron-builder --win",
+    "dist:mac": "node scripts/set-variant.js regular && electron-builder --mac",
+    "dist:linux": "node scripts/set-variant.js regular && electron-builder --linux",
+    "dist:win:demo": "node scripts/set-variant.js demo && electron-builder --win --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo",
+    "dist:mac:demo": "node scripts/set-variant.js demo && electron-builder --mac --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo",
+    "dist:linux:demo": "node scripts/set-variant.js demo && electron-builder --linux --config.productName=\"Seven Bits Coffee (Demo)\" --config.appId=com.sevenbitscoffee.desktop.demo"
   },
   "devDependencies": {
-    "electron": "^32.0.0",
-    "electron-builder": "^25.0.0",
-    "jimp": "^1.6.1",
-    "node-gyp": "^10.3.1"
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "jimp": "^1.6.1"
   },
   "build": {
     "appId": "com.sevenbitscoffee.desktop",
@@ -68,6 +66,6 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1137.0",
-    "better-sqlite3": "12.4.1"
+    "better-sqlite3": "^13.0.3"
   }
 }
