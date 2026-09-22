@@ -1,80 +1,89 @@
 /**
- * SEVEN BITS COFFEE - S3-COMPATIBLE OBJECT STORAGE
+ * SEVEN BITS COFFEE - S3-COMPATIBLE OBJECT STORAGE (opt-in)
  * Location: /s3.js
  *
- * Replaces UPLOADS_DIR (local disk) as where uploaded images actually
- * live. Talks to whatever S3-compatible endpoint the env vars point at -
- * LocalStack in dev/test, real AWS S3 in production - the exact same code
- * path either way, since that's the whole point of LocalStack emulating
- * the real S3 API rather than a fake/mocked client.
- *
- * Env vars (all optional except S3_BUCKET in production):
- *   S3_ENDPOINT           - LocalStack's URL (e.g. http://localhost:4566).
- *                            Unset -> the AWS SDK's real endpoint resolution.
- *   S3_BUCKET             - defaults to "sbc-uploads".
- *   S3_REGION             - defaults to "us-east-1".
- *   S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY
- *                         - LocalStack accepts any non-empty values here.
- *                           Unset in production -> the SDK's normal
- *                           credential chain (IAM role, ~/.aws/credentials,
- *                           etc.) is used instead.
- *   S3_FORCE_PATH_STYLE   - "1" to force path-style URLs (LocalStack needs
- *                            this); auto-enabled whenever S3_ENDPOINT is set,
- *                            since a custom endpoint is always a LocalStack/
- *                            MinIO-style dev setup, never real AWS.
+ * Local disk (UPLOADS_DIR) is the default place uploaded images live - zero
+ * setup, works for a single shop out of the box. This module is only used
+ * when an owner/admin explicitly turns on "S3-compatible storage" in
+ * Global Settings and enters a bucket/endpoint/credentials (their own AWS
+ * account, another S3-compatible provider, or credentials their vendor
+ * gave them - this module doesn't care which). See server.js's
+ * PATCH /api/config, which calls configure() with the saved settings every
+ * time they change, and main.js's boot, which calls it once with whatever
+ * was already saved.
  */
 "use strict";
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadBucketCommand, CreateBucketCommand } = require("@aws-sdk/client-s3");
 
-const BUCKET = process.env.S3_BUCKET || "sbc-uploads";
-const ENDPOINT = process.env.S3_ENDPOINT || undefined;
+let client = null;
+let bucket = null;
 
-const client = new S3Client({
-  region: process.env.S3_REGION || "us-east-1",
-  endpoint: ENDPOINT,
-  forcePathStyle: process.env.S3_FORCE_PATH_STYLE === "1" || !!ENDPOINT,
-  credentials:
-    process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY
-      ? { accessKeyId: process.env.S3_ACCESS_KEY_ID, secretAccessKey: process.env.S3_SECRET_ACCESS_KEY }
-      : undefined // falls back to the SDK's own credential chain for real AWS
-});
+/** Rebuilds (or tears down) the S3 client from the current config - called
+ *  once at boot and again every time Global Settings saves storage
+ *  settings, so a toggle/credential change takes effect immediately with
+ *  no restart. */
+function configure(config) {
+  if (config.uploadsStorage !== "s3" || !config.s3Bucket) {
+    client = null;
+    bucket = null;
+    return;
+  }
+  bucket = config.s3Bucket;
+  const endpoint = config.s3Endpoint || undefined;
+  client = new S3Client({
+    region: config.s3Region || "us-east-1",
+    endpoint,
+    // A custom endpoint only ever means a non-AWS S3-compatible service
+    // (LocalStack, MinIO, etc.) - those need path-style URLs; real AWS
+    // (no custom endpoint) uses its normal virtual-hosted-style.
+    forcePathStyle: !!endpoint,
+    credentials:
+      config.s3AccessKeyId && config.s3SecretAccessKey
+        ? { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey }
+        : undefined
+  });
+}
+
+function isEnabled() {
+  return !!client;
+}
 
 async function putObject(key, buffer, contentType) {
-  await client.send(new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: buffer, ContentType: contentType }));
+  await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: buffer, ContentType: contentType }));
 }
 
 /** Returns the object's raw Node readable stream plus its stored content
  *  type/length, for server.js to pipe straight into the HTTP response -
  *  keeps the existing `/uploads/<filename>` URL contract working exactly
- *  as before (every place that already builds that URL string needs zero
- *  changes) instead of switching callers over to a presigned S3 URL. */
+ *  the same as the local-disk path (every place that already builds that
+ *  URL string needs zero changes) instead of switching callers over to a
+ *  presigned S3 URL. */
 async function getObjectStream(key) {
-  const res = await client.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+  const res = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   return { stream: res.Body, contentType: res.ContentType, contentLength: res.ContentLength };
 }
 
 async function deleteObject(key) {
-  await client.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }
 
-/** Dev/test convenience only - LocalStack starts with no buckets at all,
- *  so this creates one on boot if it's missing. Real AWS S3 buckets are
- *  provisioned out-of-band (Terraform/console/CLI) with real access
- *  policies, so a failure here (e.g. no CreateBucket permission, which is
- *  normal and expected in production) is deliberately swallowed - it
- *  only matters that the bucket exists, not that this process was the
- *  one that created it. */
+/** Creates the configured bucket if it doesn't exist yet - convenient for
+ *  LocalStack/MinIO-style dev setups that start with nothing. A failure
+ *  here (e.g. no CreateBucket permission, normal for a real AWS bucket a
+ *  vendor/owner already provisioned by hand) is deliberately swallowed -
+ *  it only matters that the bucket exists, not that this process made it. */
 async function ensureBucket() {
+  if (!client) return;
   try {
-    await client.send(new HeadBucketCommand({ Bucket: BUCKET }));
+    await client.send(new HeadBucketCommand({ Bucket: bucket }));
   } catch (e) {
     try {
-      await client.send(new CreateBucketCommand({ Bucket: BUCKET }));
+      await client.send(new CreateBucketCommand({ Bucket: bucket }));
     } catch (e2) {
-      // Already exists (race with another process) or no permission to
-      // create it in production - either way, nothing more to do here.
+      // Already exists (race) or no permission to create it - either way,
+      // nothing more to do here.
     }
   }
 }
 
-module.exports = { putObject, getObjectStream, deleteObject, ensureBucket, BUCKET };
+module.exports = { configure, isEnabled, putObject, getObjectStream, deleteObject, ensureBucket };

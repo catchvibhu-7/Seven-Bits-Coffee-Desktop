@@ -27,6 +27,15 @@
  * bundled read-only data-seed/ templates, and the yearly order-history
  * archive files under ARCHIVES_DIR - see the migration plan's Phase 1
  * scope note on why archives/compaction are handled in a later phase.
+ *
+ * SWITCHING ENGINES LATER (e.g. to Postgres): `better-sqlite3` is required
+ * ONLY in this file - nowhere else in the app touches it directly, by
+ * design. A future swap means writing a new backend behind this exact
+ * same exported contract (readJson/writeJson/jsonExists/readJsonFile/
+ * writeJsonFile/initDb/backupTo/restoreFromBuffer) - none of the ~310+
+ * call sites in server.js, or anything else in the app, would need to
+ * change. Keep it that way: never `require("better-sqlite3")` from
+ * server.js or anywhere else.
  */
 "use strict";
 const fs = require("fs");

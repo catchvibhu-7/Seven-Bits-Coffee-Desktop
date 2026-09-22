@@ -13,22 +13,6 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 
-// Uploaded images now live in S3-compatible storage (see s3.js), not local
-// disk - defaulted to LocalStack's own default port so a shop that happens
-// to have LocalStack running locally (the dev/test setup) gets working
-// image uploads with zero configuration, same spirit as every other
-// SBC_*_DIR default in this file. A real deployment MUST override these
-// with real AWS (or another S3-compatible service's) credentials - see
-// README.md's "Image uploads" section - image uploads simply won't work
-// otherwise (loudly, via the error the upload route already returns, not
-// a silent local-disk fallback).
-process.env.S3_ENDPOINT = process.env.S3_ENDPOINT || "http://localhost:4566";
-process.env.S3_BUCKET = process.env.S3_BUCKET || "sbc-uploads";
-process.env.S3_FORCE_PATH_STYLE = process.env.S3_FORCE_PATH_STYLE || "1";
-process.env.S3_ACCESS_KEY_ID = process.env.S3_ACCESS_KEY_ID || "test";
-process.env.S3_SECRET_ACCESS_KEY = process.env.S3_SECRET_ACCESS_KEY || "test";
-const s3 = require("./s3.js");
-
 const PORT = 4173; // arbitrary fixed local port, unlikely to collide with anything else running on this machine
 
 /** Other devices on the same WiFi/LAN (a kitchen tablet, a second till, a
@@ -75,58 +59,43 @@ function readVariant() {
     }
 }
 
-// Same bundled-photo-seeding "has this already run" marker local disk used
-// to give away for free (uploadsDir either existing or not) - S3 has no
-// local folder to check, so a small marker file under userData plays the
-// same "first run only" role instead.
-const UPLOAD_SEED_MARKER = "uploads-seeded-to-s3";
-
-async function seedWritableDirs() {
+function seedWritableDirs() {
     const userDataDir = app.getPath("userData");
     const dataDir = path.join(userDataDir, "data");
-    // No longer where uploaded images actually live (that's S3 now, see
-    // s3.js) - still created and pointed at by SBC_UPLOADS_DIR purely so
-    // server.js's own unconditional fs.mkdirSync(UPLOADS_DIR) at boot has
-    // a real writable path to create, instead of defaulting to a path
-    // inside this app's own read-only asar archive.
     const uploadsDir = path.join(userDataDir, "uploads");
     const logsDir = path.join(userDataDir, "logs");
     const backupsDir = path.join(userDataDir, "backups");
-    fs.mkdirSync(uploadsDir, { recursive: true });
     // Both the demo-content auto-seed below and the upload-seeding right
     // after it are genuinely first-run-only - an update/reinstall over an
     // existing install (or one where the uninstaller's "keep data?" prompt
     // was answered yes - see build/installer.nsh) reuses this same
-    // %APPDATA% folder (and the same S3 bucket) untouched, so this check is
-    // what keeps updates from ever wiping a shop's real data back to blank
-    // or demo content.
+    // %APPDATA% folder untouched, so this check is what keeps updates from
+    // ever wiping a shop's real data back to blank or demo content.
     const isFreshInstall = !fs.existsSync(dataDir);
     fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(uploadsDir, { recursive: true });
     fs.mkdirSync(logsDir, { recursive: true });
     fs.mkdirSync(backupsDir, { recursive: true });
 
-    // First run only: push the bundled branding/menu photos (shipped
-    // read-only inside the app) into S3, so the shop looks fully set up out
-    // of the box instead of starting empty. Later runs leave it alone - the
-    // admin panel's own uploads then live only in S3, never touching the
-    // bundled originals still sitting in this install's own uploads/ folder.
-    const seedMarkerPath = path.join(userDataDir, UPLOAD_SEED_MARKER);
-    if (!fs.existsSync(seedMarkerPath)) {
+    // First run only: copy the bundled branding/menu photos (shipped
+    // read-only inside the app) into the real writable uploads folder, so
+    // the shop looks fully set up out of the box instead of starting empty.
+    // Local disk is the default storage for uploads (see s3.js/Global
+    // Settings for the opt-in S3 alternative) - a technical owner who turns
+    // S3 on later re-uploads these through the admin panel themselves,
+    // same as any other image.
+    if (isFreshInstall) {
         const bundledUploads = path.join(__dirname, "uploads");
         if (fs.existsSync(bundledUploads)) {
             for (const file of fs.readdirSync(bundledUploads)) {
                 try {
-                    const buffer = fs.readFileSync(path.join(bundledUploads, file));
-                    const ext = path.extname(file).slice(1).toLowerCase();
-                    const mimeType = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" }[ext];
-                    if (mimeType) await s3.putObject(file, buffer, mimeType);
+                    fs.copyFileSync(path.join(bundledUploads, file), path.join(uploadsDir, file));
                 } catch (e) {
                     // One bad bundled file shouldn't block the rest of boot -
                     // a shop can always re-upload a missing photo by hand.
                 }
             }
         }
-        fs.writeFileSync(seedMarkerPath, new Date().toISOString());
     }
 
     return { dataDir, uploadsDir, logsDir, backupsDir, isFreshInstall };
@@ -141,7 +110,7 @@ async function seedWritableDirs() {
  *  started yet at this point, and there's no restore-time edge case to
  *  handle (no existing users, no archives) on a folder that was empty a
  *  moment ago. */
-async function applyDemoDataIfNeeded(dataDir, isFreshInstall) {
+function applyDemoDataIfNeeded(dataDir, uploadsDir, isFreshInstall) {
     if (!isFreshInstall || !readVariant().demo) return;
     const demoPath = path.join(__dirname, "data-seed", "demo-backup.json");
     if (!fs.existsSync(demoPath)) return;
@@ -155,17 +124,15 @@ async function applyDemoDataIfNeeded(dataDir, isFreshInstall) {
     // trusted this time too.
     for (const [filename, base64] of Object.entries(payload.uploads || {})) {
         if (!/^[a-f0-9]{16}\.(png|jpg|jpeg|gif|webp)$/i.test(filename)) continue;
-        const ext = path.extname(filename).slice(1).toLowerCase();
-        const mimeType = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" }[ext];
         try {
-            await s3.putObject(filename, Buffer.from(base64, "base64"), mimeType);
+            fs.writeFileSync(path.join(uploadsDir, filename), Buffer.from(base64, "base64"));
         } catch (e) {
             // One bad demo image shouldn't block the rest of first boot.
         }
     }
 }
 
-async function startServer() {
+function startServer() {
     process.env.PORT = String(PORT);
     process.env.SBC_DEMO_BUILD = readVariant().demo ? "1" : "";
     // Same default owner credentials the web version's start.bat ships on
@@ -175,13 +142,8 @@ async function startServer() {
     // launching with `OWNER_PASSWORD=... electron .` during development).
     process.env.OWNER_USERNAME = process.env.OWNER_USERNAME || "owner";
     process.env.OWNER_PASSWORD = process.env.OWNER_PASSWORD || "changeme123";
-    // Bucket must exist before seedWritableDirs()/applyDemoDataIfNeeded()
-    // below try to push anything into it - server.js does this same call
-    // again on its own boot (harmless no-op the second time), since it also
-    // needs to work when this Desktop wrapper isn't the one running it.
-    await s3.ensureBucket();
-    const { dataDir, uploadsDir, logsDir, backupsDir, isFreshInstall } = await seedWritableDirs();
-    await applyDemoDataIfNeeded(dataDir, isFreshInstall);
+    const { dataDir, uploadsDir, logsDir, backupsDir, isFreshInstall } = seedWritableDirs();
+    applyDemoDataIfNeeded(dataDir, uploadsDir, isFreshInstall);
     process.env.SBC_DATA_DIR = dataDir;
     process.env.SBC_UPLOADS_DIR = uploadsDir;
     process.env.SBC_LOGS_DIR = logsDir;
@@ -214,7 +176,18 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-    const { logsDir, backupsDir } = await startServer();
+    let logsDir, backupsDir;
+    try {
+        ({ logsDir, backupsDir } = await startServer());
+    } catch (e) {
+        // Without this, a boot-time failure (e.g. the native SQLite binding
+        // failing to load, or a port already in use) used to fail the whole
+        // app.whenReady() promise silently - no window, no error, nothing a
+        // shop owner could act on or even report accurately.
+        dialog.showErrorBox("Seven Bits Coffee failed to start", String((e && e.stack) || e));
+        app.quit();
+        return;
+    }
     createWindow();
     Menu.setApplicationMenu(
         Menu.buildFromTemplate([

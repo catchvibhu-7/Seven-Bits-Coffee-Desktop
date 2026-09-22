@@ -1177,8 +1177,12 @@ export const AdminPortal = {
         }
         root.innerHTML = `
             <div class="config-controls">
+                <div id="storage-section"></div>
+            </div>
+
+            <div class="config-controls" style="margin-top:20px;">
                 <h3 style="margin-top:0;">BACKUP</h3>
-                <p class="admin-help-text">Downloads a complete copy of this app's database (menu, orders, staff accounts, config, everything). Uploaded photos aren't included in this file - they're already stored durably in the cloud, separate from this database.</p>
+                <p class="admin-help-text">Downloads a complete copy of this app's database (menu, orders, staff accounts, config, everything). Uploaded photos aren't included in this file - back up the "uploads" folder separately if you're using local storage (see STORAGE below), or they're already durable in the cloud if you've turned on S3.</p>
                 <button class="admin-btn-primary" id="backup-download">DOWNLOAD BACKUP</button>
 
                 ${
@@ -1238,6 +1242,68 @@ export const AdminPortal = {
                 <p id="ebackup-error" role="alert" aria-live="polite" style="color:var(--color-danger); font-size:11px; min-height:12px; margin-top:10px;"></p>
             </div>
         `;
+
+        const c = AdminConfig.settings;
+        renderReadOnlySection(document.getElementById("storage-section"), {
+            title: "STORAGE",
+            canEdit: isGlobalAdmin,
+            fields: [
+                { label: "Uploaded photos", value: c.uploadsStorage === "s3" ? "S3-compatible storage" : "This computer (local disk)" },
+                ...(c.uploadsStorage === "s3"
+                    ? [
+                          { label: "Bucket", value: c.s3Bucket || "" },
+                          { label: "Endpoint", value: c.s3Endpoint || "(default AWS S3)" },
+                          { label: "Access key", value: c.s3SecretConfigured ? "Configured" : "Not configured" }
+                      ]
+                    : [])
+            ],
+            onEdit: () =>
+                renderSectionEditModal({
+                    title: "EDIT STORAGE",
+                    fields: [
+                        {
+                            id: "pf-storage-mode",
+                            label: "Where uploaded photos live",
+                            value: c.uploadsStorage === "s3" ? "s3" : "local",
+                            type: "select",
+                            options: [
+                                { value: "local", label: "This computer (default - no setup needed)" },
+                                { value: "s3", label: "S3-compatible storage (advanced)" }
+                            ],
+                            tooltip: "Local works out of the box for one shop on one machine. S3 is for a technical owner (or a vendor-managed setup) who wants photos in cloud object storage instead - enter the bucket/endpoint/credentials below."
+                        },
+                        { id: "pf-storage-bucket", label: "Bucket name", value: c.s3Bucket || "", maxlength: 200, placeholder: "my-shop-uploads" },
+                        { id: "pf-storage-endpoint", label: "Endpoint (blank = real AWS S3)", value: c.s3Endpoint || "", maxlength: 200, placeholder: "http://localhost:4566" },
+                        { id: "pf-storage-region", label: "Region", value: c.s3Region || "us-east-1", maxlength: 60, placeholder: "us-east-1" },
+                        { id: "pf-storage-access-key", label: "Access key ID", value: c.s3AccessKeyId || "", maxlength: 200 },
+                        {
+                            id: "pf-storage-secret-key",
+                            label: "Secret access key",
+                            value: "",
+                            type: "password",
+                            maxlength: 400,
+                            placeholder: c.s3SecretConfigured ? "•••••••• (saved - leave blank to keep)" : "Enter your secret access key",
+                            tooltip: "Never shown back once saved - leave blank to keep the current one."
+                        }
+                    ],
+                    onSave: async (v) => {
+                        if (v["pf-storage-mode"] === "s3" && !v["pf-storage-bucket"].trim()) {
+                            throw new Error("Enter a bucket name to use S3 storage");
+                        }
+                        const s3SecretAccessKey = v["pf-storage-secret-key"].trim();
+                        await AdminConfig.saveSettings({
+                            uploadsStorage: v["pf-storage-mode"],
+                            s3Bucket: v["pf-storage-bucket"].trim(),
+                            s3Endpoint: v["pf-storage-endpoint"].trim(),
+                            s3Region: v["pf-storage-region"].trim(),
+                            s3AccessKeyId: v["pf-storage-access-key"].trim(),
+                            ...(s3SecretAccessKey ? { s3SecretAccessKey } : {})
+                        });
+                        ok("Storage settings saved");
+                        this.renderDataBackup(root);
+                    }
+                })
+        });
 
         document.getElementById("backup-download").addEventListener("click", () => {
             // A plain navigation (not fetch+blob) so the browser's own

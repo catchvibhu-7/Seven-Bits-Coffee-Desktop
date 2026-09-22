@@ -324,6 +324,18 @@ if (!jsonExists(CONFIG_FILE)) {
     razorpayEnabled: false,
     razorpayKeyId: "",
     razorpayKeySecret: "",
+    // Uploaded images (menu photos, branding, hero) - "local" (default)
+    // stores them right on this machine under UPLOADS_DIR, same as the
+    // app always did before S3 support existed - zero setup, works out of
+    // the box for a single shop. "s3" is an opt-in for a technical owner
+    // (or one whose vendor manages it for them) who wants uploads in
+    // S3-compatible object storage instead - see s3.js.
+    uploadsStorage: "local",
+    s3Endpoint: "",
+    s3Bucket: "",
+    s3Region: "us-east-1",
+    s3AccessKeyId: "",
+    s3SecretAccessKey: "",
     // Branding - drives CSS custom properties at runtime (see app.js
     // applyBranding()). Defaults match the original hardcoded theme, so
     // nothing changes visually until an admin edits these.
@@ -409,6 +421,12 @@ if (!jsonExists(CONFIG_FILE)) {
     // store's own `operations` field.
   });
 }
+
+// Applies whatever storage settings were already saved (or the "local"
+// default above) - PATCH /api/config calls this again every time an
+// admin changes them, so a toggle/credential change takes effect
+// immediately with no restart needed.
+s3.configure(readJson(CONFIG_FILE, {}));
 
 // One-time boot migration: back-fill storeId:null (franchise-wide) onto any
 // coupon created before coupons gained per-store scoping, without touching
@@ -3674,8 +3692,8 @@ function configForSession(session, explicitStoreId = null) {
 // it's meant for the client-side checkout widget). The secret only ever
 // needs to leave this process when calling Razorpay's API server-to-server.
 function maskSecrets(config) {
-  const { razorpayKeySecret, ...rest } = config;
-  return { ...rest, razorpaySecretConfigured: !!razorpayKeySecret };
+  const { razorpayKeySecret, s3SecretAccessKey, ...rest } = config;
+  return { ...rest, razorpaySecretConfigured: !!razorpayKeySecret, s3SecretConfigured: !!s3SecretAccessKey };
 }
 
 route("GET", /^\/api\/config\/?$/, async (req, res, params, url) => {
@@ -3720,11 +3738,21 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
     "defaultNavLayout",
     "homeFullWidth",
     "razorpayEnabled",
-    "razorpayKeyId"
+    "razorpayKeyId",
+    "uploadsStorage",
+    "s3Endpoint",
+    "s3Bucket",
+    "s3Region",
+    "s3AccessKeyId"
   ];
   for (const key of allowed) {
     if (body[key] !== undefined) config[key] = body[key];
   }
+  if (config.uploadsStorage !== "s3") config.uploadsStorage = "local";
+  if (typeof config.s3Endpoint === "string") config.s3Endpoint = config.s3Endpoint.trim().slice(0, 200);
+  if (typeof config.s3Bucket === "string") config.s3Bucket = config.s3Bucket.trim().slice(0, 200);
+  if (typeof config.s3Region === "string") config.s3Region = config.s3Region.trim().slice(0, 60) || "us-east-1";
+  if (typeof config.s3AccessKeyId === "string") config.s3AccessKeyId = config.s3AccessKeyId.trim().slice(0, 200);
   if (body.loyalty && typeof body.loyalty === "object") {
     config.loyalty = { ...config.loyalty, ...body.loyalty };
     config.loyalty.enabled = Boolean(config.loyalty.enabled);
@@ -3748,6 +3776,11 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
   // accidentally wipe it with an empty string.
   if (typeof body.razorpayKeySecret === "string" && body.razorpayKeySecret.trim()) {
     config.razorpayKeySecret = body.razorpayKeySecret.trim().slice(0, 200);
+  }
+  // Same never-echoed-back-so-never-accidentally-wiped pattern as
+  // razorpayKeySecret above.
+  if (typeof body.s3SecretAccessKey === "string" && body.s3SecretAccessKey.trim()) {
+    config.s3SecretAccessKey = body.s3SecretAccessKey.trim().slice(0, 400);
   }
   // shopName/heroTagline are rendered directly into the home page - cap
   // length and strip control chars so a bad paste can't break layout.
@@ -3869,6 +3902,7 @@ route("PATCH", /^\/api\/config\/?$/, async (req, res) => {
     }
   }
   writeJson(CONFIG_FILE, config);
+  s3.configure(config);
   sendJson(res, 200, maskSecrets(config));
 });
 
@@ -3963,11 +3997,15 @@ route("POST", /^\/api\/uploads\/?$/, async (req, res) => {
   }
   const id = crypto.randomBytes(8).toString("hex");
   const filename = `${id}${ext}`;
-  try {
-    await s3.putObject(filename, buffer, mimeType);
-  } catch (e) {
-    logEvent("error", "S3 upload failed", { message: e.message });
-    return sendJson(res, 502, { error: "Could not store the image - check S3/LocalStack configuration" });
+  if (s3.isEnabled()) {
+    try {
+      await s3.putObject(filename, buffer, mimeType);
+    } catch (e) {
+      logEvent("error", "S3 upload failed", { message: e.message });
+      return sendJson(res, 502, { error: "Could not store the image - check S3 storage settings in Global Settings" });
+    }
+  } else {
+    fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
   }
 
   const uploads = readJson(UPLOADS_MANIFEST_FILE, []);
@@ -4031,9 +4069,10 @@ route("DELETE", /^\/api\/uploads\/(?<id>[\w-]+)\/?$/, async (req, res, params, u
     return sendJson(res, 409, { error: `Still used by: ${usedIn.join(", ")}`, usedIn });
   }
   try {
-    await s3.deleteObject(entry.filename);
+    if (s3.isEnabled()) await s3.deleteObject(entry.filename);
+    else fs.unlinkSync(path.join(UPLOADS_DIR, entry.filename));
   } catch (e) {
-    // Already gone from S3 somehow - still clean up the manifest entry below.
+    // Already gone somehow - still clean up the manifest entry below.
   }
   writeJson(
     UPLOADS_MANIFEST_FILE,
@@ -6884,9 +6923,9 @@ const STATIC_ROOTS = [
   { prefix: "/css/", dir: path.join(ROOT_DIR, "css") },
   { prefix: "/js/", dir: path.join(ROOT_DIR, "js") }
 ];
-// /uploads/* is handled separately below (serveUpload()) - those files live
-// in S3, not on local disk, so they can't go through serveFile()'s plain
-// fs.readFile the way css/js do.
+// /uploads/* is handled separately below (serveUpload()) - it may be
+// serving from S3 instead of local disk (see s3.isEnabled()), so it can't
+// be a fixed STATIC_ROOTS entry the way css/js always-local-disk are.
 
 function serveFile(res, filePath) {
   fs.readFile(filePath, (err, data) => {
@@ -6911,19 +6950,24 @@ function serveFile(res, filePath) {
   });
 }
 
-// Streams an uploaded image straight from S3 - keeps the existing
-// `/uploads/<filename>` URL every menu item photo/branding image/etc.
-// already embeds working unchanged, rather than switching every one of
-// those call sites over to a presigned S3 URL. Filenames only ever come
-// from this server's own upload route (crypto.randomBytes hex + a fixed
-// extension), so this same shape check other upload-adjacent code already
-// uses (restore validation) doubles as this route's path-traversal guard -
-// nothing resembling a "../" can ever match it.
+// Serves an uploaded image - from S3 when that's turned on (Global
+// Settings), otherwise straight off local disk (UPLOADS_DIR, the default).
+// Either way this keeps the existing `/uploads/<filename>` URL every menu
+// item photo/branding image/etc. already embeds working unchanged, so
+// nothing else in the app needs to know or care which one is active.
+// Filenames only ever come from this server's own upload route
+// (crypto.randomBytes hex + a fixed extension), so this same shape check
+// other upload-adjacent code already uses (restore validation) doubles as
+// this route's path-traversal guard - nothing resembling a "../" can ever
+// match it.
 const UPLOAD_FILENAME_RE = /^[a-f0-9]{16}\.(png|jpg|jpeg|gif|webp)$/i;
 async function serveUpload(res, filename) {
   if (!UPLOAD_FILENAME_RE.test(filename)) {
     res.writeHead(404, { "Content-Type": "text/plain" });
     return res.end("Not found");
+  }
+  if (!s3.isEnabled()) {
+    return serveFile(res, path.join(UPLOADS_DIR, filename));
   }
   try {
     const { stream, contentType, contentLength } = await s3.getObjectStream(filename);
