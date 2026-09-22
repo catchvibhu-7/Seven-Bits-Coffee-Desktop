@@ -135,11 +135,11 @@ export async function renderStaffHome(session) {
                 storeStatus.pausedOrders.enabled
                     ? `<button type="button" id="store-status-resume" class="staff-logout-btn" style="padding:10px 16px; font-size:11px; min-height:40px;">RESUME ORDERS</button>`
                     : `
-                <button type="button" id="store-status-pause-traffic" style="padding:10px 14px; font-size:11px; min-height:40px; background:transparent; border:2px solid var(--color-danger); color:var(--color-danger); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Pause – Heavy Traffic</button>
-                <button type="button" id="store-status-pause-snag" style="padding:10px 14px; font-size:11px; min-height:40px; background:transparent; border:2px solid var(--color-danger); color:var(--color-danger); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Pause – Snag</button>
+                <button type="button" id="store-status-pause-traffic" style="padding:10px 14px; font-size:11px; min-height:40px; background:transparent; border:1px solid var(--color-border); color:var(--color-danger); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Pause – Heavy Traffic</button>
+                <button type="button" id="store-status-pause-snag" style="padding:10px 14px; font-size:11px; min-height:40px; background:transparent; border:1px solid var(--color-border); color:var(--color-danger); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Pause – Snag</button>
             `
             }
-            <button type="button" id="store-status-close" style="padding:10px 16px; font-size:11px; min-height:40px; background:transparent; border:2px solid var(--color-text-muted); color:var(--color-text-muted); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Close For The Day</button>
+            <button type="button" id="store-status-close" style="padding:10px 16px; font-size:11px; min-height:40px; background:transparent; border:1px solid var(--color-border); color:var(--color-text-muted); font-weight:bold; letter-spacing:.06em; text-transform:uppercase; cursor:pointer;">Close For The Day</button>
         `;
 
     root.innerHTML = `
@@ -153,19 +153,6 @@ export async function renderStaffHome(session) {
                 </div>
                 <button type="button" id="staff-home-new-order" class="staff-logout-btn" style="background:var(--color-accent); color:var(--color-accent-contrast); border:2px solid var(--color-accent); padding:14px 24px; font-size:13px; min-height:44px;">[ NEW ORDER ]</button>
             </div>
-
-            ${
-                storeId != null
-                    ? `
-            <div style="margin-top:16px; padding:14px 18px; background:var(--color-surface); border:1px solid ${statusColor}; display:flex; flex-wrap:wrap; align-items:center; gap:14px; justify-content:space-between;">
-                <div style="min-width:0;">
-                    <div style="font-size:10px; letter-spacing:.16em; color:var(--color-text-muted); text-transform:uppercase;">Store status</div>
-                    <div style="font-size:15px; font-weight:bold; letter-spacing:.03em; margin-top:4px; color:${statusColor}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(statusLabel)}</div>
-                </div>
-                <div style="display:flex; gap:8px; flex-wrap:wrap;">${statusButtonsHtml}</div>
-            </div>`
-                    : ""
-            }
 
             <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(212px,1fr)); gap:14px; margin-top:26px;">
                 ${[
@@ -190,6 +177,19 @@ export async function renderStaffHome(session) {
             </div>
 
             <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(min(420px,100%),1fr)); gap:14px; margin-top:14px; align-items:start;">
+                <div style="display:flex; flex-direction:column; gap:14px; min-width:0;">
+                    ${
+                        storeId != null
+                            ? `
+                    <div style="padding:14px 18px; background:var(--color-surface); border:1px solid var(--color-border); display:flex; flex-wrap:wrap; align-items:center; gap:14px; justify-content:space-between;">
+                        <div style="min-width:0;">
+                            <div style="font-size:10px; letter-spacing:.16em; color:var(--color-text-muted); text-transform:uppercase;">Store status</div>
+                            <div style="font-size:15px; font-weight:bold; letter-spacing:.03em; margin-top:4px; color:${statusColor}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(statusLabel)}</div>
+                        </div>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">${statusButtonsHtml}</div>
+                    </div>`
+                            : ""
+                    }
                 <div class="staff-widget-card" style="padding:18px 20px 8px; min-width:0;">
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; border-left:5px solid var(--color-accent); padding-left:12px;">
                         <h2 style="font-size:13px; font-weight:bold; letter-spacing:.24em; margin:0; text-transform:uppercase; color:var(--color-accent);">Live pass</h2>
@@ -216,6 +216,7 @@ export async function renderStaffHome(session) {
                                       .join("")
                         }
                     </div>
+                </div>
                 </div>
 
                 <div style="display:flex; flex-direction:column; gap:14px;">

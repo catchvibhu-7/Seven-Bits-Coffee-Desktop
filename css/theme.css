@@ -109,6 +109,7 @@
     --color-cyan: #22d3ee;
     --color-success: #4ade80;
     --color-danger: #f87171;
+    --color-banner: #3b82f6;
 }
 
 body.theme-light {
@@ -2604,15 +2605,15 @@ input[type="checkbox"]:disabled {
     overflow: hidden;
     white-space: nowrap;
     background: var(--color-surface);
-    border-top: 1px solid var(--color-danger);
-    border-bottom: 1px solid var(--color-danger);
+    border-top: 1px solid var(--color-banner);
+    border-bottom: 1px solid var(--color-banner);
     padding: 10px 0;
     margin: 20px -20px 0;
 }
 .home-delivery-ticker-track {
     display: inline-block;
     padding-left: 100%;
-    color: var(--color-danger);
+    color: var(--color-banner);
     font-size: 11px;
     font-weight: bold;
     letter-spacing: 0.08em;
@@ -2639,10 +2640,17 @@ input[type="checkbox"]:disabled {
 /* "Closed for the day" / "orders paused" notice (see
    renderHomeStoreStatusBanner() in app.js) - static, not a scrolling
    ticker like delivery's above, since this is the one thing on the page
-   most worth a visitor actually stopping to read in full immediately. */
+   most worth a visitor actually stopping to read in full immediately.
+   Same muted surface-background-plus-colored-border language as
+   .home-delivery-ticker above (a solid full-bleed fill in the admin's
+   accent-adjacent palette read as a jarring, eye-straining wall of color -
+   a thin colored border and tinted text still reads as "pay attention"
+   without fighting every other accent-colored thing on the page). */
 .home-store-status-banner {
-    background: var(--color-danger);
-    color: var(--color-bg);
+    background: var(--color-surface);
+    color: var(--color-banner);
+    border-top: 1px solid var(--color-banner);
+    border-bottom: 1px solid var(--color-banner);
     text-align: center;
     font-weight: bold;
     font-size: 13px;
@@ -2652,17 +2660,13 @@ input[type="checkbox"]:disabled {
 }
 /* 7-day stamp card (see renderHomeStampCard() in app.js) - a row of 7
    "stamp" slots plus an 8th reward slot, filled left-to-right as a phone
-   number orders on distinct calendar days. Lives in the hero's left column
-   right below the START ORDER/Arcade buttons, not full-bleed like the
-   facts strip below it - hidden entirely unless the shop has turned this
-   on and the visitor is signed in (customer or guest). */
+   number orders on distinct calendar days. Lives in the side column above
+   "Find us" (.home-side-col's own flex gap handles spacing), full-width
+   to match - hidden entirely unless the shop has turned this on and the
+   visitor is signed in (customer or guest). Gets .home-widget's own
+   background/border/padding (see below) for that match; this class only
+   adds what's specific to the stamp card itself. */
 .home-stamp-card {
-    margin-top: 6px;
-    padding: 10px 16px;
-    width: fit-content;
-    max-width: 100%;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
     cursor: help; /* hints there's a tooltip (see the .title attribute set in renderHomeStampCard()) */
 }
 .stamp-card-row {
@@ -2680,43 +2684,45 @@ input[type="checkbox"]:disabled {
     border: 1px dashed var(--color-border);
     background: var(--color-bg);
     flex-shrink: 0;
-    transition: border-color 0.3s, box-shadow 0.3s;
+    transition: border-color 0.3s, background-color 0.3s, transform 0.3s;
 }
 .stamp-dot .icon {
     width: 17px;
     height: 17px;
     opacity: 0.35;
-    transition: opacity 0.3s;
+    transition: opacity 0.3s, background-color 0.3s;
 }
+/* Filled = an actual ink-stamped slot, not a glowing/lit-up one: a solid
+   filled circle (like ink pressed onto paper) with the icon flipped to the
+   contrast color, plus a slight per-dot tilt - a real rubber stamp never
+   lands perfectly straight twice in a row, so uniform circles read as
+   "highlighted UI state" rather than "stamped". */
 .stamp-dot-filled {
-    border: 1px solid var(--color-accent);
-    box-shadow: 0 0 8px 0 var(--color-accent);
+    border: 2px solid var(--color-accent);
+    background: var(--color-accent);
+    transform: rotate(-4deg);
+}
+.stamp-dot-filled:nth-child(even) {
+    transform: rotate(3deg);
+}
+.stamp-dot-filled:nth-child(3n) {
+    transform: rotate(-2deg);
 }
 .stamp-dot-filled .icon {
     opacity: 1;
+    background-color: var(--color-accent-contrast);
 }
 .stamp-dot-reward {
     border-style: solid;
 }
 .stamp-dot-ready {
     border-color: var(--color-accent);
-    animation: stamp-card-glow 1.6s ease-in-out infinite;
+    background: var(--color-accent);
+    transform: rotate(2deg);
 }
 .stamp-dot-ready .icon {
     opacity: 1;
-}
-@keyframes stamp-card-glow {
-    0%, 100% {
-        box-shadow: 0 0 0 0 var(--color-accent);
-    }
-    50% {
-        box-shadow: 0 0 16px 4px var(--color-accent);
-    }
-}
-@media (prefers-reduced-motion: reduce) {
-    .stamp-dot-ready {
-        animation: none;
-    }
+    background-color: var(--color-accent-contrast);
 }
 
 .home-fact {
